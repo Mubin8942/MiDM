@@ -16,6 +16,22 @@ let msgId = 0;
 
 function nextId() { return `${++msgId}`; }
 
+// ── Upsert helper ────────────────────────────────────────────────────────────
+// Replaces the task if it already exists by id, otherwise prepends it.
+// This makes every task_added call idempotent — no matter how many WS
+// clients receive the broadcast, the task only ever appears once.
+function upsertTask(tasks, incoming) {
+  const idx = tasks.findIndex(t => t.id === incoming.id);
+  if (idx !== -1) {
+    // Already exists — merge in latest data (same as task_updated behaviour)
+    const updated = [...tasks];
+    updated[idx] = { ...tasks[idx], ...incoming };
+    return updated;
+  }
+  // New task — prepend so newest appears at the top
+  return [incoming, ...tasks];
+}
+
 export const useDownloadStore = create((set, get) => ({
   // ── State ──────────────────────────────────────
   tasks: [],          // DownloadTask[]
@@ -89,19 +105,28 @@ export const useDownloadStore = create((set, get) => ({
     if (msg.type === 'event') {
       const { event, data } = msg;
 
+      // FIX: init always replaces the full task list — never appends.
+      // This is the single source of truth on (re)connect.
       if (event === 'init') {
         set({ tasks: data.tasks || [], stats: data.stats || {} });
         return;
       }
 
+      // FIX: upsert instead of blind prepend.
+      // The backend broadcasts task_added to ALL connected WS clients.
+      // With 2 sockets open (React StrictMode, two Tauri windows, etc.)
+      // the same task_added fires twice into the same Zustand store,
+      // producing a duplicate row. upsertTask checks by id first and
+      // merges instead of prepending when the task already exists.
       if (event === 'task_added') {
-        set(s => ({ tasks: [data, ...s.tasks] }));
+        set(s => ({ tasks: upsertTask(s.tasks, data) }));
         return;
       }
 
+      // task_progress and task_updated both just merge by id — no change needed.
       if (event === 'task_progress' || event === 'task_updated') {
         set(s => ({
-          tasks: s.tasks.map(t => t.id === data.id ? { ...t, ...data } : t)
+          tasks: s.tasks.map(t => t.id === data.id ? { ...t, ...data } : t),
         }));
         return;
       }
@@ -142,18 +167,19 @@ export const useDownloadStore = create((set, get) => ({
     });
   },
 
-  pauseDownload: (id) => get()._send('pause', { id }),
+  pauseDownload:  (id) => get()._send('pause',  { id }),
   resumeDownload: (id) => get()._send('resume', { id }),
   cancelDownload: (id) => get()._send('cancel', { id }),
   removeDownload: (id, deleteFile = false) =>
     get()._send('remove', { id, delete_file: deleteFile }),
 
   // ── UI State ───────────────────────────────────
-  setFilter: (filterStatus) => set({ filterStatus }),
-  selectTask: (id) => set({ selectedId: id }),
+  setFilter:  (filterStatus) => set({ filterStatus }),
+  selectTask: (id)           => set({ selectedId: id }),
 }));
 
-// Utility: format bytes
+// ── Utilities ────────────────────────────────────────────────────────────────
+
 export function fmtBytes(bytes) {
   if (!bytes || bytes === 0) return '0 B';
   const k = 1024;

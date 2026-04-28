@@ -24,21 +24,22 @@ log = logging.getLogger("MiDM.manager")
 class DownloadManager:
     """
     High-level orchestrator.
-    - Maintains the task queue
-    - Controls concurrency (max N simultaneous downloads)
+    - Maintains the task registry
+    - Supports unlimited simultaneous downloads (no semaphore cap)
     - Persists state across restarts
     - Emits events to the UI layer
     """
 
-    MAX_CONCURRENT = 3
-
     def __init__(self, on_event: Optional[Callable] = None, ssl_context=None):
         self.tasks: dict[str, DownloadTask] = {}
-        self.on_event = on_event        # async callback(event_type, data)
+        self.on_event = on_event
         self._engine = DownloadEngine(on_progress=self._on_progress, ssl_context=ssl_context)
-        self._queue: asyncio.Queue = asyncio.Queue()
-        self._semaphore: Optional[asyncio.Semaphore] = None
         self._running = False
+
+        # Track the asyncio.Task for each active download so we can
+        # detect whether a download is truly still running before resuming.
+        # key = task.id, value = asyncio.Task
+        self._active_tasks: dict[str, asyncio.Task] = {}
 
     # ─────────────────────────────────────────────
     # Lifecycle
@@ -46,9 +47,7 @@ class DownloadManager:
 
     async def start(self):
         self._running = True
-        self._semaphore = asyncio.Semaphore(self.MAX_CONCURRENT)
         self._load_state()
-        asyncio.create_task(self._queue_worker())
 
     async def stop(self):
         self._running = False
@@ -65,7 +64,7 @@ class DownloadManager:
         filename: str = "",
         num_connections: int = 8,
     ) -> DownloadTask:
-        """Create and enqueue a new download task."""
+        """Create and immediately start a new download task."""
 
         if not save_dir:
             save_dir = str(Path.home() / "Downloads")
@@ -82,10 +81,12 @@ class DownloadManager:
         )
 
         self.tasks[task.id] = task
-        await self._queue.put(task)
         await self._emit("task_added", task.to_dict())
         self._save_state()
         log.info(f"[{task.id}] Queued: {url}")
+
+        # Start immediately — no queue, no semaphore cap
+        self._launch(task)
         return task
 
     async def pause_download(self, task_id: str):
@@ -98,46 +99,87 @@ class DownloadManager:
 
     async def resume_download(self, task_id: str):
         """
-        FIX: Previously only flipped the status flag without re-queuing,
-        so the download never actually restarted.
-        Now we re-enqueue the task so _queue_worker picks it up again.
+        Resume a paused download.
+
+        BUG FIX: The previous implementation called _engine.resume() (which
+        just sets an asyncio.Event) and then re-enqueued the task, causing
+        _run() to be called a SECOND time while the original coroutine was
+        still alive and still writing to the same .part files.  This produced
+        WinError 32 (file in use) when the second _run() tried to merge or
+        delete a segment that the first was still writing.
+
+        The correct approach:
+          - If the original asyncio.Task is still alive → just call
+            _engine.resume() to unblock the pause_event.  The existing
+            coroutine keeps running; no second launch.
+          - If the original asyncio.Task is gone (e.g. was cancelled or
+            crashed) → launch a fresh one so the download actually restarts.
         """
         task = self.tasks.get(task_id)
         if not task:
             log.warning(f"[{task_id}] resume_download: task not found")
             return
         if task.status != DownloadStatus.PAUSED:
-            log.warning(f"[{task_id}] resume_download: task is not paused (status={task.status})")
+            log.warning(f"[{task_id}] resume_download: not paused (status={task.status})")
             return
 
-        # Tell the engine to resume (clears its internal pause flag)
-        self._engine.resume(task_id)
-        # Re-queue so the worker actually drives the download again
-        task.status = DownloadStatus.QUEUED
-        await self._queue.put(task)
-        await self._emit("task_updated", task.to_dict())
-        log.info(f"[{task_id}] Resumed and re-queued")
+        active = self._active_tasks.get(task_id)
+
+        if active and not active.done():
+            # Original coroutine is still alive — just unpause it.
+            # Do NOT launch a second _run(); that would cause two coroutines
+            # writing to the same .part files simultaneously.
+            log.info(f"[{task_id}] Resuming existing coroutine (still alive)")
+            self._engine.resume(task_id)
+            task.status = DownloadStatus.DOWNLOADING
+            await self._emit("task_updated", task.to_dict())
+        else:
+            # Original coroutine is gone — safe to launch a fresh one.
+            log.info(f"[{task_id}] Original coroutine gone, launching fresh _run")
+            self._engine.resume(task_id)   # clear any stale pause flag
+            task.status = DownloadStatus.QUEUED
+            await self._emit("task_updated", task.to_dict())
+            self._launch(task)
+
+        log.info(f"[{task_id}] Resumed")
 
     async def cancel_download(self, task_id: str):
         task = self.tasks.get(task_id)
-        if task:
-            self._engine.cancel(task_id)
-            task.status = DownloadStatus.CANCELLED
-            await self._emit("task_updated", task.to_dict())
-            self._cleanup_temp(task)
-            log.info(f"[{task_id}] Cancelled")
+        if not task:
+            return
+
+        self._engine.cancel(task_id)
+        task.status = DownloadStatus.CANCELLED
+        await self._emit("task_updated", task.to_dict())
+        log.info(f"[{task_id}] Cancelled — waiting for coroutine to exit before cleanup")
+
+        # Wait for the active asyncio.Task to finish so the .part files are
+        # no longer open before we try to delete them (fixes WinError 32).
+        active = self._active_tasks.get(task_id)
+        if active and not active.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(active), timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass   # best-effort; we'll still attempt cleanup below
+
+        self._cleanup_temp(task)
 
     async def remove_download(self, task_id: str, delete_file: bool = False):
         task = self.tasks.get(task_id)
         if not task:
             return
+
+        # cancel handles waiting + temp cleanup
         await self.cancel_download(task_id)
+
         if delete_file:
             save_path = getattr(task, "save_path", None)
             if save_path and os.path.exists(save_path):
                 os.remove(save_path)
                 log.info(f"[{task_id}] Deleted file: {save_path}")
+
         del self.tasks[task_id]
+        self._active_tasks.pop(task_id, None)
         await self._emit("task_removed", {"id": task_id})
         self._save_state()
         log.info(f"[{task_id}] Removed")
@@ -160,68 +202,50 @@ class DownloadManager:
     # Internal
     # ─────────────────────────────────────────────
 
-    async def _queue_worker(self):
-        """Pull tasks from queue and run them, respecting MAX_CONCURRENT."""
-        while self._running:
-            try:
-                task = await asyncio.wait_for(self._queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-
-            if task.status in (DownloadStatus.CANCELLED, DownloadStatus.COMPLETED):
-                log.debug(f"[{task.id}] Skipping task with status={task.status}")
-                continue
-
-            log.info(f"[{task.id}] Dispatching to engine (status={task.status})")
-            # Launch in a separate task so the queue worker is unblocked
-            # and can pick up the next item immediately (up to MAX_CONCURRENT).
-            asyncio.create_task(self._run_with_semaphore(task))
-
-    async def _run_with_semaphore(self, task: DownloadTask):
+    def _launch(self, task: DownloadTask):
         """
-        Acquire semaphore slot then drive the full download.
-
-        FIX: The original code did:
-            download_task = await self._engine.start(task)   # got the asyncio.Task
-            await download_task                              # awaited it
-        This is correct IF engine.start() is a coroutine that internally
-        creates-and-returns an asyncio.Task.  BUT if engine.start() is itself
-        a coroutine that does the work directly (not returning a Task), the
-        second await would raise TypeError or silently no-op depending on the
-        return value.  We now handle both patterns safely.
+        Create an asyncio.Task for one download and register it in
+        _active_tasks so resume_download can check whether it's still alive.
         """
-        async with self._semaphore:
-            log.info(f"[{task.id}] Download starting (semaphore acquired)")
-            try:
-                result = await self._engine.start(task)
+        log.info(f"[{task.id}] Launching download coroutine")
+        t = asyncio.create_task(self._run_download(task))
+        self._active_tasks[task.id] = t
 
-                # engine.start() may return:
-                #   a) an asyncio.Task  -> we must await it
-                #   b) None / other    -> download already ran inline; nothing to await
-                if asyncio.isfuture(result) or asyncio.iscoroutine(result):
-                    await result
+        # Auto-remove from _active_tasks when done (keeps the dict lean)
+        def _on_done(fut):
+            self._active_tasks.pop(task.id, None)
 
-                log.info(f"[{task.id}] Download finished with status={task.status}")
+        t.add_done_callback(_on_done)
 
-            except asyncio.CancelledError:
-                # Task was cancelled cleanly — don't mark as FAILED
-                log.info(f"[{task.id}] Download cancelled (CancelledError)")
-                if task.status not in (DownloadStatus.CANCELLED, DownloadStatus.COMPLETED):
-                    task.status = DownloadStatus.CANCELLED
-                    await self._emit("task_updated", task.to_dict())
+    async def _run_download(self, task: DownloadTask):
+        """Drive a single download from start to finish."""
+        log.info(f"[{task.id}] Download starting")
+        try:
+            result = await self._engine.start(task)
 
-            except Exception as e:
-                # Catch-all: log the full traceback so it is NEVER silently swallowed
-                log.exception(f"[{task.id}] Download failed: {e}")
-                if task.status not in (
-                    DownloadStatus.CANCELLED,
-                    DownloadStatus.COMPLETED,
-                    DownloadStatus.FAILED,
-                ):
-                    task.status = DownloadStatus.FAILED
-                    task.error = str(e)
-                    await self._emit("task_updated", task.to_dict())
-                    self._save_state()
+            # engine.start() returns an asyncio.Task; await it.
+            if asyncio.isfuture(result) or asyncio.iscoroutine(result):
+                await result
+
+            log.info(f"[{task.id}] Download finished with status={task.status}")
+
+        except asyncio.CancelledError:
+            log.info(f"[{task.id}] Download cancelled (CancelledError)")
+            if task.status not in (DownloadStatus.CANCELLED, DownloadStatus.COMPLETED):
+                task.status = DownloadStatus.CANCELLED
+                await self._emit("task_updated", task.to_dict())
+
+        except Exception as e:
+            log.exception(f"[{task.id}] Download failed: {e}")
+            if task.status not in (
+                DownloadStatus.CANCELLED,
+                DownloadStatus.COMPLETED,
+                DownloadStatus.FAILED,
+            ):
+                task.status = DownloadStatus.FAILED
+                task.error = str(e)
+                await self._emit("task_updated", task.to_dict())
+                self._save_state()
 
     async def _on_progress(self, task: DownloadTask):
         await self._emit("task_progress", task.to_dict())
@@ -232,8 +256,6 @@ class DownloadManager:
             try:
                 await self.on_event(event, data)
             except Exception as e:
-                # FIX: log instead of silently swallowing — previously you could
-                # never tell if the UI callback itself was crashing.
                 log.error(f"_emit({event}) callback raised: {e}", exc_info=True)
 
     # ─────────────────────────────────────────────
@@ -246,7 +268,6 @@ class DownloadManager:
             data = {tid: t.to_dict() for tid, t in self.tasks.items()}
             STATE_FILE.write_text(json.dumps(data, indent=2))
         except Exception as e:
-            # FIX: was silently ignored
             log.error(f"_save_state failed: {e}", exc_info=True)
 
     def _load_state(self):
@@ -255,7 +276,6 @@ class DownloadManager:
         try:
             data = json.loads(STATE_FILE.read_text())
             for tid, td in data.items():
-                # Restore only non-active tasks; treat in-flight as paused
                 status = DownloadStatus(td.get("status", "queued"))
                 if status in (DownloadStatus.DOWNLOADING, DownloadStatus.CONNECTING):
                     td["status"] = DownloadStatus.PAUSED.value
@@ -267,8 +287,6 @@ class DownloadManager:
                 self.tasks[tid] = task
             log.info(f"Loaded {len(self.tasks)} task(s) from state file")
         except Exception as e:
-            # FIX: was silently ignored — a corrupt state file would cause
-            # a blank task list with zero indication of why.
             log.error(f"_load_state failed: {e}", exc_info=True)
 
     # ─────────────────────────────────────────────
@@ -284,13 +302,12 @@ class DownloadManager:
 
     def _cleanup_temp(self, task: DownloadTask):
         """
-        FIX: original code mixed attribute access and dict access without
-        a consistent check, causing AttributeError on dict segments or
-        KeyError on object segments — both silently swallowed.
+        Delete all .part files for a task.
+        Called only after the download coroutine has exited so files are
+        guaranteed to be closed (no WinError 32).
         """
         for seg in getattr(task, "segments", []):
             try:
-                # Support both dataclass/object segments and plain dicts
                 if hasattr(seg, "temp_path"):
                     temp_path = seg.temp_path
                 elif isinstance(seg, dict):

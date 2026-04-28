@@ -79,9 +79,23 @@ class DownloadTask:
     def to_dict(self) -> dict:
         d = asdict(self)
         d["status"] = self.status.value if hasattr(self.status, "value") else self.status
-        d["progress"] = self.progress       # include computed property
-        d["save_path"] = self.save_path     # include computed property
+        d["progress"] = self.progress
+        d["save_path"] = self.save_path
         return d
+
+
+# Browser-like headers that satisfy most servers rejecting bot-like requests
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "identity",   # prevent gzip so Content-Length stays accurate
+    "Connection": "keep-alive",
+}
 
 
 class DownloadEngine:
@@ -99,11 +113,12 @@ class DownloadEngine:
     MAX_CONNECTIONS  = 16
     DEFAULT_CONNECTIONS = 8
 
+    # How many times to retry a segment on transient errors before giving up
+    SEGMENT_RETRIES = 3
+    RETRY_BACKOFF   = [1, 3, 7]     # seconds between retries
+
     def __init__(self, on_progress: Optional[Callable] = None, ssl_context=None):
         self.on_progress = on_progress
-        # FIX: accept an explicit SSL context (built with certifi in server.py).
-        # Original code hardcoded ssl=False which disables certificate verification
-        # entirely — HTTPS downloads either silently failed or posed a security risk.
         self._ssl_context = ssl_context
         self._active: dict[str, asyncio.Task] = {}
         self._cancel_flags: dict[str, bool] = {}
@@ -154,20 +169,16 @@ class DownloadEngine:
         log.info(f"[{task.id}] Connecting to {task.url}")
 
         try:
-            # FIX: was aiohttp.TCPConnector(ssl=False) — this disabled ALL SSL
-            # verification, meaning HTTPS could silently fail or be insecure.
-            # Now we pass the certifi-backed ssl_context from server.py.
-            # If ssl_context is None, aiohttp uses its own default (also safe).
             connector = aiohttp.TCPConnector(
                 limit=self.MAX_CONNECTIONS,
                 ssl=self._ssl_context,   # None → aiohttp default; SSLContext → certifi
             )
             async with aiohttp.ClientSession(
-                headers={"User-Agent": "Mozilla/5.0 (compatible; MiDM/1.0)"},
+                headers=_DEFAULT_HEADERS,
                 connector=connector,
             ) as session:
 
-                # Step 1: HEAD request to get file info
+                # Step 1: Probe for file info
                 await self._probe(session, task)
                 log.info(
                     f"[{task.id}] Probed — size={task.total_size} "
@@ -211,8 +222,6 @@ class DownloadEngine:
             task.status = DownloadStatus.FAILED
             task.error = str(e)
             await self._notify(task)
-            # FIX: was just `raise` with no log — errors vanished if the caller
-            # also swallowed them. Log here so it always appears in the file log.
             log.exception(f"[{task.id}] Download failed: {e}")
             raise
 
@@ -220,53 +229,106 @@ class DownloadEngine:
             self._active.pop(task.id, None)
 
     async def _probe(self, session: aiohttp.ClientSession, task: DownloadTask):
-        """HEAD request to discover file size and range support."""
+        """
+        Discover file size and resume support.
+
+        Strategy (in order):
+          1. HEAD request  — cleanest, no body transfer
+          2. GET Range:0-0 — servers that reject HEAD but honour Range
+          3. Plain GET     — stream just enough to read headers, then abort
+                             (catches servers that return 403 on Range requests
+                              but allow a plain GET, e.g. some CDNs / redirect chains)
+
+        A 403/401 on any method does NOT raise immediately — we try the next
+        strategy so the actual download GET has a fair shot.
+        """
         timeout = aiohttp.ClientTimeout(total=20)
+
+        # ── Strategy 1: HEAD ──────────────────────────────────────────────
         try:
             async with session.head(task.url, allow_redirects=True, timeout=timeout) as r:
-                r.raise_for_status()    # FIX: was silently ignoring 4xx/5xx on HEAD
-                task.total_size = int(r.headers.get("Content-Length", 0))
-                accept = r.headers.get("Accept-Ranges", "").lower()
-                task.supports_resume = (accept == "bytes" and task.total_size > 0)
-
-                ct = r.headers.get("Content-Type", "")
-                task.file_type = self._classify_mime(ct)
-
-                cd = r.headers.get("Content-Disposition", "")
-                if "filename=" in cd and not task.filename:
-                    task.filename = cd.split("filename=")[-1].strip().strip('"\'')
-
-                log.debug(f"[{task.id}] HEAD {r.status} — Content-Length={task.total_size} Accept-Ranges={accept!r}")
-                return
-
+                if r.status == 200:
+                    self._extract_probe_headers(r.headers, task)
+                    log.debug(
+                        f"[{task.id}] HEAD {r.status} — "
+                        f"Content-Length={task.total_size} "
+                        f"Accept-Ranges={r.headers.get('Accept-Ranges', '')!r}"
+                    )
+                    return
+                else:
+                    log.debug(f"[{task.id}] HEAD returned {r.status}, trying Range GET")
         except Exception as e:
-            # HEAD failed — some servers don't support it; try a ranged GET instead
-            log.warning(f"[{task.id}] HEAD failed ({e}), falling back to GET bytes=0-0")
+            log.warning(f"[{task.id}] HEAD failed ({e}), trying Range GET")
 
-        # Fallback: ranged GET to sniff Content-Range
+        # ── Strategy 2: GET Range: bytes=0-0 ─────────────────────────────
         try:
             async with session.get(
                 task.url,
                 headers={"Range": "bytes=0-0"},
                 timeout=timeout,
             ) as r:
-                cr = r.headers.get("Content-Range", "")
-                if cr and "/" in cr:
-                    total = cr.split("/")[-1]
-                    if total.isdigit():
-                        task.total_size = int(total)
-                        task.supports_resume = True
-                        log.debug(f"[{task.id}] Fallback GET — total={task.total_size}")
-                ct = r.headers.get("Content-Type", "")
-                task.file_type = self._classify_mime(ct)
+                if r.status in (200, 206):
+                    self._extract_probe_headers(r.headers, task)
+                    # 206 with Content-Range tells us the real total
+                    cr = r.headers.get("Content-Range", "")
+                    if cr and "/" in cr:
+                        total_str = cr.split("/")[-1]
+                        if total_str.isdigit():
+                            task.total_size = int(total_str)
+                            task.supports_resume = True
+                    log.debug(
+                        f"[{task.id}] Range-GET {r.status} — "
+                        f"total={task.total_size} resume={task.supports_resume}"
+                    )
+                    return
+                else:
+                    log.debug(f"[{task.id}] Range GET returned {r.status}, trying plain GET probe")
         except Exception as e:
-            # Both probe methods failed — will attempt a plain single-connection download
-            log.warning(f"[{task.id}] Fallback probe also failed ({e}). Continuing without size info.")
+            log.warning(f"[{task.id}] Range GET failed ({e}), trying plain GET probe")
+
+        # ── Strategy 3: plain GET (read headers only, close immediately) ──
+        # Some servers (e.g. link.testfile.org) return 403 on HEAD/Range but
+        # serve fine on a plain GET.  We open the connection, grab the headers,
+        # then immediately close without reading the body.
+        try:
+            async with session.get(task.url, timeout=timeout) as r:
+                if r.status == 200:
+                    self._extract_probe_headers(r.headers, task)
+                    log.debug(
+                        f"[{task.id}] Plain-GET probe {r.status} — "
+                        f"total={task.total_size}"
+                    )
+                    # supports_resume stays False — we'll use a single segment
+                    return
+                else:
+                    # Even plain GET is blocked — log and continue; the real
+                    # download attempt below may still succeed (redirect, cookie, etc.)
+                    log.warning(
+                        f"[{task.id}] Plain-GET probe returned {r.status}. "
+                        "Will attempt download anyway."
+                    )
+        except Exception as e:
+            log.warning(f"[{task.id}] All probe strategies failed ({e}). "
+                        "Attempting download without size info.")
+
+    def _extract_probe_headers(self, headers, task: DownloadTask):
+        """Pull file metadata out of response headers."""
+        cl = headers.get("Content-Length", "0")
+        if cl.isdigit():
+            task.total_size = int(cl)
+
+        accept = headers.get("Accept-Ranges", "").lower()
+        task.supports_resume = (accept == "bytes" and task.total_size > 0)
+
+        ct = headers.get("Content-Type", "")
+        task.file_type = self._classify_mime(ct)
+
+        cd = headers.get("Content-Disposition", "")
+        if "filename=" in cd and not task.filename:
+            task.filename = cd.split("filename=")[-1].strip().strip('"\'')
 
     def _build_segments(self, task: DownloadTask):
         """Divide file into equal initial segments."""
-        # FIX: original always rebuilt segments even on resume, discarding progress.
-        # Only rebuild if segments list is empty (fresh download).
         if task.segments:
             log.debug(f"[{task.id}] Reusing {len(task.segments)} existing segments (resume)")
             return
@@ -294,8 +356,8 @@ class DownloadEngine:
     async def _download_all(self, session: aiohttp.ClientSession, task: DownloadTask):
         """
         Download all segments in parallel.
-        Implements IDM's dynamic segment stealing:
-          when a segment finishes, it steals half of the largest remaining segment.
+        Each segment is retried up to SEGMENT_RETRIES times on transient errors.
+        Implements IDM's dynamic segment stealing when a segment finishes early.
         """
         lock = asyncio.Lock()
 
@@ -304,71 +366,118 @@ class DownloadEngine:
                 return
 
             pause_ev = self._pause_events[task.id]
-            headers = {}
-            if task.supports_resume:
-                headers["Range"] = f"bytes={seg.current_pos}-{seg.end}"
 
-            log.debug(f"[{task.id}] seg{seg.index} starting — {headers.get('Range', 'no-range')}")
+            for attempt in range(self.SEGMENT_RETRIES + 1):
+                if self._cancel_flags.get(task.id):
+                    return
 
-            try:
-                async with session.get(
-                    task.url,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=None, connect=20, sock_read=60),
-                ) as resp:
-                    # FIX: was silently ignoring bad HTTP status on segment fetch
-                    if resp.status not in (200, 206):
-                        raise RuntimeError(
-                            f"seg{seg.index}: unexpected HTTP {resp.status} for {task.url}"
-                        )
+                # Build request headers for this segment
+                req_headers: dict = {}
+                if task.supports_resume:
+                    req_headers["Range"] = f"bytes={seg.current_pos}-{seg.end}"
 
-                    mode = "ab" if seg.downloaded > 0 else "wb"
-                    async with aiofiles.open(seg.temp_path, mode) as f:
-                        t_last = time.monotonic()
-                        bytes_since = 0
+                range_label = req_headers.get("Range", "no-range")
+                log.debug(
+                    f"[{task.id}] seg{seg.index} attempt {attempt + 1} — {range_label}"
+                )
 
-                        async for chunk in resp.content.iter_chunked(self.CHUNK_SIZE):
-                            if self._cancel_flags.get(task.id):
-                                return
+                try:
+                    async with session.get(
+                        task.url,
+                        headers=req_headers,
+                        timeout=aiohttp.ClientTimeout(total=None, connect=20, sock_read=60),
+                    ) as resp:
 
-                            await pause_ev.wait()   # block while paused
+                        # ── Status validation ────────────────────────────
+                        if resp.status not in (200, 206):
+                            # 403/401 on a ranged request sometimes means the
+                            # server doesn't support Range but accepts plain GET.
+                            # Retry without the Range header using a single segment.
+                            if resp.status in (403, 401) and task.supports_resume:
+                                log.warning(
+                                    f"[{task.id}] seg{seg.index} got {resp.status} "
+                                    "with Range header — disabling multi-segment and retrying"
+                                )
+                                task.supports_resume = False
+                                # Collapse to a single segment and restart
+                                task.segments.clear()
+                                task.downloaded = 0
+                                seg.downloaded = 0
+                                seg.start = 0
+                                seg.end = 0
+                                seg.temp_path = self._temp_path(task, 0)
+                                req_headers.pop("Range", None)
+                                # Re-enter with the corrected segment next attempt
+                                continue
 
-                            await f.write(chunk)
-                            n = len(chunk)
-                            seg.downloaded += n
-                            bytes_since += n
+                            raise RuntimeError(
+                                f"seg{seg.index}: unexpected HTTP {resp.status} for {task.url}"
+                            )
 
-                            now = time.monotonic()
-                            elapsed = now - t_last
-                            if elapsed >= 0.5:
-                                seg.speed = bytes_since / elapsed
-                                bytes_since = 0
-                                t_last = now
-                                async with lock:
-                                    await self._update_stats(task)
-                                    await self._notify(task)
+                        # ── Stream to temp file ──────────────────────────
+                        mode = "ab" if seg.downloaded > 0 else "wb"
+                        async with aiofiles.open(seg.temp_path, mode) as f:
+                            t_last = time.monotonic()
+                            bytes_since = 0
 
-                    seg.done = True
-                    log.debug(f"[{task.id}] seg{seg.index} done ({seg.downloaded} bytes)")
+                            async for chunk in resp.content.iter_chunked(self.CHUNK_SIZE):
+                                if self._cancel_flags.get(task.id):
+                                    return
 
-                    # Try to steal half of largest remaining segment
-                    async with lock:
-                        stolen = self._try_steal(task, seg)
+                                await pause_ev.wait()   # block while paused
 
-                    if stolen:
-                        log.debug(f"[{task.id}] seg{seg.index} stealing → new seg{stolen.index}")
-                        await download_segment(stolen)
+                                await f.write(chunk)
+                                n = len(chunk)
+                                seg.downloaded += n
+                                bytes_since += n
 
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                if not self._cancel_flags.get(task.id):
-                    log.exception(f"[{task.id}] seg{seg.index} failed: {e}")
+                                now = time.monotonic()
+                                elapsed = now - t_last
+                                if elapsed >= 0.5:
+                                    seg.speed = bytes_since / elapsed
+                                    bytes_since = 0
+                                    t_last = now
+                                    async with lock:
+                                        await self._update_stats(task)
+                                        await self._notify(task)
+
+                        seg.done = True
+                        log.debug(f"[{task.id}] seg{seg.index} done ({seg.downloaded} bytes)")
+
+                        # Try to steal half of largest remaining segment
+                        async with lock:
+                            stolen = self._try_steal(task, seg)
+
+                        if stolen:
+                            log.debug(
+                                f"[{task.id}] seg{seg.index} stealing → new seg{stolen.index}"
+                            )
+                            await download_segment(stolen)
+
+                        return  # success — exit retry loop
+
+                except asyncio.CancelledError:
                     raise
 
+                except Exception as e:
+                    if self._cancel_flags.get(task.id):
+                        return
+
+                    if attempt < self.SEGMENT_RETRIES:
+                        wait = self.RETRY_BACKOFF[min(attempt, len(self.RETRY_BACKOFF) - 1)]
+                        log.warning(
+                            f"[{task.id}] seg{seg.index} error (attempt {attempt + 1}): {e}. "
+                            f"Retrying in {wait}s…"
+                        )
+                        await asyncio.sleep(wait)
+                    else:
+                        log.exception(
+                            f"[{task.id}] seg{seg.index} failed after "
+                            f"{self.SEGMENT_RETRIES + 1} attempts: {e}"
+                        )
+                        raise
+
         workers = [download_segment(s) for s in task.segments]
-        # FIX: return_exceptions=False means the first segment failure cancels the rest
-        # and propagates up to _run, which marks the task FAILED with a real error message.
         await asyncio.gather(*workers, return_exceptions=False)
 
     def _try_steal(self, task: DownloadTask, finished_seg: Segment) -> Optional[Segment]:
@@ -419,11 +528,13 @@ class DownloadEngine:
                             await out.write(chunk)
                     os.remove(seg.temp_path)
                 else:
-                    log.warning(f"[{task.id}] Missing temp file for seg{seg.index}: {seg.temp_path}")
+                    log.warning(
+                        f"[{task.id}] Missing temp file for seg{seg.index}: {seg.temp_path}"
+                    )
 
-        # Clean up the temp directory if empty
+        # Clean up ~/.midm/tmp if it is now empty
         try:
-            tmp_dir = os.path.join(task.save_dir, ".midm_tmp")
+            tmp_dir = os.path.join(os.path.expanduser("~"), ".midm", "tmp")
             if os.path.isdir(tmp_dir) and not os.listdir(tmp_dir):
                 os.rmdir(tmp_dir)
         except Exception:
@@ -434,7 +545,9 @@ class DownloadEngine:
     # ─────────────────────────────────────────────
 
     def _temp_path(self, task: DownloadTask, seg_index: int) -> str:
-        tmp_dir = os.path.join(task.save_dir, ".midm_tmp")
+        # Always store .part files in ~/.midm/tmp/ so they never appear
+        # inside the user's chosen download folder.
+        tmp_dir = os.path.join(os.path.expanduser("~"), ".midm", "tmp")
         os.makedirs(tmp_dir, exist_ok=True)
         return os.path.join(tmp_dir, f"{task.id}_seg{seg_index}.part")
 
@@ -453,5 +566,4 @@ class DownloadEngine:
             try:
                 await self.on_progress(task)
             except Exception as e:
-                # FIX: was silently swallowed — now logged so UI callback crashes are visible
                 log.error(f"[{task.id}] _notify callback raised: {e}", exc_info=True)
