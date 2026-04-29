@@ -98,23 +98,6 @@ class DownloadManager:
             log.info(f"[{task_id}] Paused")
 
     async def resume_download(self, task_id: str):
-        """
-        Resume a paused download.
-
-        BUG FIX: The previous implementation called _engine.resume() (which
-        just sets an asyncio.Event) and then re-enqueued the task, causing
-        _run() to be called a SECOND time while the original coroutine was
-        still alive and still writing to the same .part files.  This produced
-        WinError 32 (file in use) when the second _run() tried to merge or
-        delete a segment that the first was still writing.
-
-        The correct approach:
-          - If the original asyncio.Task is still alive → just call
-            _engine.resume() to unblock the pause_event.  The existing
-            coroutine keeps running; no second launch.
-          - If the original asyncio.Task is gone (e.g. was cancelled or
-            crashed) → launch a fresh one so the download actually restarts.
-        """
         task = self.tasks.get(task_id)
         if not task:
             log.warning(f"[{task_id}] resume_download: task not found")
@@ -142,6 +125,27 @@ class DownloadManager:
             self._launch(task)
 
         log.info(f"[{task_id}] Resumed")
+    
+    async def retry_download(self, task_id: str):
+        task = self.tasks.get(task_id)
+        if not task:
+            log.warning(f"[{task_id}] retry_download: task not found")
+            return
+        if task.status != DownloadStatus.FAILED:
+            log.warning(f"[{task_id}] retry_download: not failed (status={task.status})")
+            return
+        log.info(f"[{task_id}] Retrying failed download: {task.url}")
+        task.status = DownloadStatus.QUEUED
+        task.error = None
+        task.speed = 0.0
+        task.eta = 0.0
+        for seg in task.segments:
+            if not seg.done:
+                seg.speed = 0.0
+
+        await self._emit("task_updated", task.to_dict())
+        self._save_state()
+        self._launch(task)
 
     async def cancel_download(self, task_id: str):
         task = self.tasks.get(task_id)

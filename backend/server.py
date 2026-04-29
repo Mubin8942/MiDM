@@ -108,7 +108,7 @@ class MiDMServer:
             "tasks": self._manager.get_all_tasks(),
             "stats": self._manager.get_stats(),
         })
-
+        
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
@@ -155,6 +155,10 @@ class MiDMServer:
 
             elif cmd == "resume":
                 await self._manager.resume_download(data["id"])
+                result = {"ok": True}
+            
+            elif cmd == "retry":
+                await self._manager.retry_download(data["id"])
                 result = {"ok": True}
 
             elif cmd == "cancel":

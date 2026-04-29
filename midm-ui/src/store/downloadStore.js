@@ -169,6 +169,7 @@ export const useDownloadStore = create((set, get) => ({
 
   pauseDownload:  (id) => get()._send('pause',  { id }),
   resumeDownload: (id) => get()._send('resume', { id }),
+  retryDownload: (id) => get()._send('retry', { id }),
   cancelDownload: (id) => get()._send('cancel', { id }),
   removeDownload: (id, deleteFile = false) =>
     get()._send('remove', { id, delete_file: deleteFile }),

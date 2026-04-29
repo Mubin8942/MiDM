@@ -8,6 +8,7 @@ import aiohttp
 import aiofiles
 import logging
 import os
+import gc
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Callable
@@ -202,6 +203,8 @@ class DownloadEngine:
                     return
 
                 # Step 4: Merge segments
+                gc.collect()
+                await asyncio.sleep(0.2)
                 task.status = DownloadStatus.MERGING
                 await self._notify(task)
                 log.info(f"[{task.id}] Merging segments → {task.save_path}")
@@ -526,7 +529,12 @@ class DownloadEngine:
                             if not chunk:
                                 break
                             await out.write(chunk)
-                    os.remove(seg.temp_path)
+                    await asyncio.sleep(0.1)
+                    try:
+                        os.remove(seg.temp_path)
+                    except PermissionError:
+                        await asyncio.sleep(0.5)
+                        os.remove(seg.temp_path)
                 else:
                     log.warning(
                         f"[{task.id}] Missing temp file for seg{seg.index}: {seg.temp_path}"

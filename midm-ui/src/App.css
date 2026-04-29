@@ -218,3 +218,45 @@ html, body, #root { height: 100%; font-family: var(--font); font-size: 13px; col
 .browse-btn:active {
   background: rgba(59, 158, 255, 0.28);
 }
+
+.action-btn.retry:hover {
+  background: #3b9eff20;
+  color: var(--accent);
+  border-color: #3b9eff40;
+}
+
+/* Toast */
+.toast {
+  position: fixed;
+  bottom: calc(var(--statusbar-h) + 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: #1c2230;
+  border: 1px solid #f59e0b60;
+  border-radius: var(--radius);
+  color: var(--amber);
+  font-size: 12.5px;
+  box-shadow: var(--shadow);
+  z-index: 9999;
+  animation: slide-up 0.2s var(--ease-spring);
+  max-width: 400px;
+}
+
+.toast-close {
+  margin-left: 6px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.toast-close:hover {
+  color: var(--text);
+}

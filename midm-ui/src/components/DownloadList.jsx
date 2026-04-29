@@ -1,9 +1,23 @@
+import { useState } from 'react';
 import { useDownloadStore, fmtBytes, fmtSpeed, fmtEta } from '../store/downloadStore';
 import {
   Download, Pause, Play, X, Trash2, FolderOpen,
   Film, Music, Archive, FileText, Image, Package, File,
-  Plus
+  Plus, RotateCcw, AlertTriangle
 } from 'lucide-react';
+import { revealItemInDir } from '@tauri-apps/plugin-opener';
+import { exists } from '@tauri-apps/plugin-fs';
+
+// ─── Toast ───────────────────────────────────────────────────────────────────
+function Toast({ message, onClose }) {
+  return (
+    <div className="toast">
+      <AlertTriangle size={14} />
+      <span>{message}</span>
+      <button className="toast-close" onClick={onClose}>×</button>
+    </div>
+  );
+}
 
 // ─── File type icons ────────────────────────────────────────────────────────
 const TYPE_ICONS = {
@@ -28,21 +42,22 @@ const STATUS_COLORS = {
 };
 
 // ─── Download Card ───────────────────────────────────────────────────────────
-function DownloadCard({ task }) {
-  const { pauseDownload, resumeDownload, cancelDownload, removeDownload, selectTask, selectedId } =
-    useDownloadStore();
+function DownloadCard({ task, onToast }) {
+  const {
+    pauseDownload, resumeDownload, cancelDownload,
+    removeDownload, retryDownload, selectTask, selectedId
+  } = useDownloadStore();
 
   const Icon = TYPE_ICONS[task.file_type] || File;
   const color = STATUS_COLORS[task.status] || '#94a3b8';
-  const isActive = task.status === 'downloading';
-  const isPaused = task.status === 'paused';
-  const isDone   = task.status === 'completed';
-  const isFailed = task.status === 'failed';
-  const isSelected = selectedId === task.id;
+  const isActive    = task.status === 'downloading';
+  const isPaused    = task.status === 'paused';
+  const isDone      = task.status === 'completed';
+  const isFailed    = task.status === 'failed';
+  const isSelected  = selectedId === task.id;
 
   const progress = task.progress || 0;
 
-  // Segment visualization (up to 16 bars)
   const segBars = (task.segments || []).slice(0, 16).map((seg, i) => {
     const segTotal = seg.end - seg.start + 1;
     const segPct = segTotal > 0 ? Math.min((seg.downloaded / segTotal) * 100, 100) : 0;
@@ -53,24 +68,31 @@ function DownloadCard({ task }) {
     );
   });
 
+  const handleShowInFolder = async () => {
+  try {
+    const sep = task.save_dir.endsWith('\\') || task.save_dir.endsWith('/') ? '' : '\\';
+    const filePath = `${task.save_dir}${sep}${task.filename}`;
+    await revealItemInDir(filePath);
+    } catch (e) {
+      onToast(`"${task.filename}" was not found. It may have been moved or deleted.`);
+    }
+  };
+
   return (
     <div
       className={`download-card ${isSelected ? 'selected' : ''} status-${task.status}`}
       onClick={() => selectTask(isSelected ? null : task.id)}
     >
-      {/* Left: File icon */}
       <div className="card-icon" style={{ color }}>
         <Icon size={20} strokeWidth={1.5} />
       </div>
 
-      {/* Center: Info */}
       <div className="card-body">
         <div className="card-top">
           <span className="card-filename" title={task.filename}>{task.filename}</span>
           <span className="card-status" style={{ color }}>{task.status}</span>
         </div>
 
-        {/* Progress bar */}
         <div className="progress-track">
           <div
             className="progress-fill"
@@ -83,7 +105,6 @@ function DownloadCard({ task }) {
           />
         </div>
 
-        {/* Stats row */}
         <div className="card-stats">
           <span className="stat-size">
             {task.total_size
@@ -103,13 +124,11 @@ function DownloadCard({ task }) {
           </span>
         </div>
 
-        {/* Segment visualization */}
         {isActive && segBars.length > 1 && (
           <div className="seg-bars">{segBars}</div>
         )}
       </div>
 
-      {/* Right: Actions */}
       <div className="card-actions" onClick={e => e.stopPropagation()}>
         {isActive && (
           <button className="action-btn" title="Pause" onClick={() => pauseDownload(task.id)}>
@@ -121,12 +140,13 @@ function DownloadCard({ task }) {
             <Play size={14} />
           </button>
         )}
+        {isFailed && (
+          <button className="action-btn retry" title="Retry" onClick={() => retryDownload(task.id)}>
+            <RotateCcw size={14} />
+          </button>
+        )}
         {isDone && (
-          <button className="action-btn" title="Open folder" onClick={() => {
-            if (window.__TAURI__) {
-              window.__TAURI__.shell.open(task.save_dir);
-            }
-          }}>
+          <button className="action-btn" title="Show in folder" onClick={handleShowInFolder}>
             <FolderOpen size={14} />
           </button>
         )}
@@ -135,11 +155,7 @@ function DownloadCard({ task }) {
             <X size={14} />
           </button>
         )}
-        <button
-          className="action-btn danger"
-          title="Remove"
-          onClick={() => removeDownload(task.id)}
-        >
+        <button className="action-btn danger" title="Remove" onClick={() => removeDownload(task.id)}>
           <Trash2 size={14} />
         </button>
       </div>
@@ -150,6 +166,12 @@ function DownloadCard({ task }) {
 // ─── Download List ───────────────────────────────────────────────────────────
 export default function DownloadList({ onAdd }) {
   const { tasks, filterStatus } = useDownloadStore();
+  const [toast, setToast] = useState(null);
+
+  const showToast = (message) => {
+    setToast(message);
+    setTimeout(() => setToast(null), 4000);
+  };
 
   const visible = filterStatus === 'all'
     ? tasks
@@ -170,12 +192,13 @@ export default function DownloadList({ onAdd }) {
 
   return (
     <div className="download-list">
+      {toast && <Toast message={toast} onClose={() => setToast(null)} />}
       <div className="list-header">
         <span>{visible.length} item{visible.length !== 1 ? 's' : ''}</span>
       </div>
       <div className="cards">
         {visible.map(task => (
-          <DownloadCard key={task.id} task={task} />
+          <DownloadCard key={task.id} task={task} onToast={showToast} />
         ))}
       </div>
     </div>
