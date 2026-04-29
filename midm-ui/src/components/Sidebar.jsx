@@ -3,7 +3,7 @@ import { Download, CheckCircle, Pause, Clock, AlertCircle, Layers, Settings, Fol
 import { useDownloadStore } from '../store/downloadStore';
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import { downloadDir } from '@tauri-apps/api/path';
-import { exists } from '@tauri-apps/plugin-fs';
+import SettingsModal from './SettingsModal';
 
 const NAV = [
   { id: 'all',         label: 'All Downloads', icon: Layers },
@@ -26,7 +26,8 @@ function Toast({ message, onClose }) {
 
 export default function Sidebar() {
   const { tasks, filterStatus, setFilter } = useDownloadStore();
-  const [toast, setToast] = useState(null);
+  const [toast, setToast]               = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
 
   const count = (status) => {
     if (status === 'all') return tasks.length;
@@ -39,66 +40,76 @@ export default function Sidebar() {
   };
 
   const openDownloadsFolder = async () => {
-  try {
-    const recentCompleted = [...tasks]
-      .reverse()
-      .find(t => t.status === 'completed' && t.save_dir && t.filename);
+    try {
+      const recentCompleted = [...tasks]
+        .reverse()
+        .find(t => t.status === 'completed' && t.save_dir && t.filename);
 
-    if (recentCompleted) {
-      const sep = recentCompleted.save_dir.endsWith('\\') || recentCompleted.save_dir.endsWith('/') ? '' : '\\';
-      const filePath = `${recentCompleted.save_dir}${sep}${recentCompleted.filename}`;
-      try {
-        await revealItemInDir(filePath);
-        return;
-      } catch {
-        // File gone — try opening just the folder
+      if (recentCompleted) {
+        const sep = recentCompleted.save_dir.endsWith('\\') || recentCompleted.save_dir.endsWith('/') ? '' : '\\';
+        const filePath = `${recentCompleted.save_dir}${sep}${recentCompleted.filename}`;
         try {
-          await openPath(recentCompleted.save_dir);
+          await revealItemInDir(filePath);
           return;
         } catch {
-          showToast(`"${recentCompleted.filename}" was not found. It may have been moved or deleted.`);
-          return;
+          try {
+            await openPath(recentCompleted.save_dir);
+            return;
+          } catch {
+            showToast(`"${recentCompleted.filename}" was not found. It may have been moved or deleted.`);
+            return;
+          }
         }
       }
-    }
 
-    // Fallback: system Downloads folder
-    const dir = await downloadDir();
-    await openPath(dir);
-  } catch (e) {
-    showToast('Could not open the downloads folder.');
-  }
-};
+      // Fallback: system Downloads folder
+      const dir = await downloadDir();
+      try {
+        await openPath(dir);
+      } catch {
+        await revealItemInDir(dir + '\\placeholder');
+      }
+    } catch (e) {
+      console.error('Failed to open downloads folder:', e);
+      showToast('Could not open the downloads folder.');
+    }
+  };
 
   return (
-    <aside className="sidebar">
-      {toast && <Toast message={toast} onClose={() => setToast(null)} />}
-      <nav className="sidebar-nav">
-        {NAV.map(({ id, label, icon: Icon }) => {
-          const n = count(id);
-          return (
-            <button
-              key={id}
-              className={`nav-item ${filterStatus === id ? 'active' : ''}`}
-              onClick={() => setFilter(id)}
-            >
-              <Icon size={15} />
-              <span>{label}</span>
-              {n > 0 && <em className="badge">{n}</em>}
-            </button>
-          );
-        })}
-      </nav>
-      <div className="sidebar-footer">
-        <button className="nav-item" onClick={openDownloadsFolder}>
-          <FolderOpen size={15} />
-          <span>Downloads Folder</span>
-        </button>
-        <button className="nav-item">
-          <Settings size={15} />
-          <span>Settings</span>
-        </button>
-      </div>
-    </aside>
+    <>
+      {showSettings && (
+        <SettingsModal onClose={() => setShowSettings(false)} />
+      )}
+
+      <aside className="sidebar">
+        {toast && <Toast message={toast} onClose={() => setToast(null)} />}
+        <nav className="sidebar-nav">
+          {NAV.map(({ id, label, icon: Icon }) => {
+            const n = count(id);
+            return (
+              <button
+                key={id}
+                className={`nav-item ${filterStatus === id ? 'active' : ''}`}
+                onClick={() => setFilter(id)}
+              >
+                <Icon size={15} />
+                <span>{label}</span>
+                {n > 0 && <em className="badge">{n}</em>}
+              </button>
+            );
+          })}
+        </nav>
+        <div className="sidebar-footer">
+          <button className="nav-item" onClick={openDownloadsFolder}>
+            <FolderOpen size={15} />
+            <span>Downloads Folder</span>
+          </button>
+          <button className="nav-item" onClick={() => setShowSettings(true)}>
+            <Settings size={15} />
+            <span>Settings</span>
+          </button>
+        </div>
+      </aside>
+    </>
   );
 }

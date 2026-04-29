@@ -6,7 +6,6 @@ import {
   Plus, RotateCcw, AlertTriangle
 } from 'lucide-react';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
-import { exists } from '@tauri-apps/plugin-fs';
 
 // ─── Toast ───────────────────────────────────────────────────────────────────
 function Toast({ message, onClose }) {

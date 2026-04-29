@@ -107,6 +107,7 @@ class MiDMServer:
         await self._send(ws, "init", {
             "tasks": self._manager.get_all_tasks(),
             "stats": self._manager.get_stats(),
+            "settings": self._manager.get_settings(),
         })
         
         try:
@@ -160,6 +161,13 @@ class MiDMServer:
             elif cmd == "retry":
                 await self._manager.retry_download(data["id"])
                 result = {"ok": True}
+
+            elif cmd == "get_settings":
+                result = self._manager.get_settings()
+
+            elif cmd == "save_settings":
+                result = self._manager.update_settings(data)
+                await self._broadcast_event("settings_updated", result)
 
             elif cmd == "cancel":
                 await self._manager.cancel_download(data["id"])

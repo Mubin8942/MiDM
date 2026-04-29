@@ -14,6 +14,7 @@ from typing import Optional, Callable
 from urllib.parse import urlparse, unquote
 
 from .downloader import DownloadEngine, DownloadTask, DownloadStatus
+from .settings import SettingsManager
 
 
 STATE_FILE = Path.home() / ".midm" / "state.json"
@@ -40,6 +41,7 @@ class DownloadManager:
         # detect whether a download is truly still running before resuming.
         # key = task.id, value = asyncio.Task
         self._active_tasks: dict[str, asyncio.Task] = {}
+        self.settings = SettingsManager()
 
     # ─────────────────────────────────────────────
     # Lifecycle
@@ -48,6 +50,7 @@ class DownloadManager:
     async def start(self):
         self._running = True
         self._load_state()
+        asyncio.create_task(self._auto_remove_loop())
 
     async def stop(self):
         self._running = False
@@ -62,15 +65,14 @@ class DownloadManager:
         url: str,
         save_dir: str = "",
         filename: str = "",
-        num_connections: int = 8,
+        num_connections: int = 0,
     ) -> DownloadTask:
-        """Create and immediately start a new download task."""
-
         if not save_dir:
-            save_dir = str(Path.home() / "Downloads")
-
+            save_dir = self.settings.get("save_dir", str(Path.home() / "Downloads"))
         if not filename:
             filename = self._filename_from_url(url)
+        if num_connections <= 0:
+            num_connections = self.settings.get("connections", 8)
 
         task = DownloadTask(
             id=str(uuid.uuid4())[:8],
@@ -79,13 +81,15 @@ class DownloadManager:
             save_dir=save_dir,
             num_connections=min(num_connections, DownloadEngine.MAX_CONNECTIONS),
         )
+        # Inject retry settings from config
+        auto_retry = self.settings.get("auto_retry", True)
+        max_retries = self.settings.get("max_retries", 3)
+        task._segment_retries = max_retries if auto_retry else 0
 
         self.tasks[task.id] = task
         await self._emit("task_added", task.to_dict())
         self._save_state()
         log.info(f"[{task.id}] Queued: {url}")
-
-        # Start immediately — no queue, no semaphore cap
         self._launch(task)
         return task
 
@@ -139,6 +143,10 @@ class DownloadManager:
         task.error = None
         task.speed = 0.0
         task.eta = 0.0
+        # Re-apply retry settings in case user changed them in settings
+        auto_retry  = self.settings.get("auto_retry", True)
+        max_retries = self.settings.get("max_retries", 3)
+        task._segment_retries = max_retries if auto_retry else 0
         for seg in task.segments:
             if not seg.done:
                 seg.speed = 0.0
@@ -201,6 +209,33 @@ class DownloadManager:
             "total_speed": total_speed,
             "speed_human": self._human_speed(total_speed),
         }
+    def update_settings(self, data: dict) -> dict:
+        return self.settings.update(data)
+
+    def get_settings(self) -> dict:
+        return self.settings.get_all()
+
+    async def _auto_remove_loop(self):
+        """Background loop that removes completed tasks older than auto_remove_hours."""
+        while self._running:
+            try:
+                hours = self.settings.get("auto_remove_hours", 0)
+                if hours and hours > 0:
+                    now = time.time()
+                    threshold = hours * 3600
+                    to_remove = [
+                        tid for tid, t in list(self.tasks.items())
+                        if t.status == DownloadStatus.COMPLETED
+                        and t.completed_at
+                        and (now - t.completed_at) >= threshold
+                    ]
+                    for tid in to_remove:
+                        log.info(f"[{tid}] Auto-removing completed task (older than {hours}h)")
+                        await self.remove_download(tid)
+            except Exception as e:
+                log.error(f"_auto_remove_loop error: {e}", exc_info=True)
+            # Check every 60 seconds
+            await asyncio.sleep(60)
 
     # ─────────────────────────────────────────────
     # Internal
@@ -246,10 +281,36 @@ class DownloadManager:
                 DownloadStatus.COMPLETED,
                 DownloadStatus.FAILED,
             ):
-                task.status = DownloadStatus.FAILED
-                task.error = str(e)
-                await self._emit("task_updated", task.to_dict())
-                self._save_state()
+                auto_retry  = self.settings.get("auto_retry", True)
+                max_retries = self.settings.get("max_retries", 3)
+        
+                # Check how many times this task has already been auto-retried
+                retry_count = getattr(task, '_auto_retry_count', 0)
+        
+                if auto_retry and retry_count < max_retries:
+                    task._auto_retry_count = retry_count + 1
+                    log.info(
+                        f"[{task.id}] Auto-retrying "
+                        f"({task._auto_retry_count}/{max_retries})..."
+                    )
+                    task.status = DownloadStatus.QUEUED
+                    task.error  = None
+                    task.speed  = 0.0
+                    task.eta    = 0.0
+                    for seg in getattr(task, 'segments', []):
+                        if not seg.done:
+                            seg.speed = 0.0
+                    await self._emit("task_updated", task.to_dict())
+                    self._save_state()
+                    # Wait briefly before relaunching
+                    await asyncio.sleep(3)
+                    self._launch(task)
+                else:
+                    task.status = DownloadStatus.FAILED
+                    task.error  = str(e)
+                    task._auto_retry_count = 0  # reset for next manual retry
+                    await self._emit("task_updated", task.to_dict())
+                    self._save_state()
 
     async def _on_progress(self, task: DownloadTask):
         await self._emit("task_progress", task.to_dict())

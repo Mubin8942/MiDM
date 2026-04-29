@@ -1,45 +1,58 @@
-/**
- * MiDM - WebSocket Store
- * Zustand store that manages real-time connection to the Python backend
- * and all download state.
- */
-
 import { create } from 'zustand';
+import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 
 const WS_URL = 'ws://127.0.0.1:7475/ws';
 const HTTP_URL = 'http://127.0.0.1:7475';
 
 let ws = null;
 let reconnectTimer = null;
-let pendingReplies = {}; // id -> {resolve, reject}
+let pendingReplies = {};
 let msgId = 0;
 
 function nextId() { return `${++msgId}`; }
 
-// ── Upsert helper ────────────────────────────────────────────────────────────
-// Replaces the task if it already exists by id, otherwise prepends it.
-// This makes every task_added call idempotent — no matter how many WS
-// clients receive the broadcast, the task only ever appears once.
 function upsertTask(tasks, incoming) {
   const idx = tasks.findIndex(t => t.id === incoming.id);
   if (idx !== -1) {
-    // Already exists — merge in latest data (same as task_updated behaviour)
     const updated = [...tasks];
     updated[idx] = { ...tasks[idx], ...incoming };
     return updated;
   }
-  // New task — prepend so newest appears at the top
   return [incoming, ...tasks];
+}
+
+// Apply theme to document
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme || 'dark');
+}
+
+async function notifyComplete(filename) {
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) {
+      const permission = await requestPermission();
+      granted = permission === 'granted';
+    }
+    if (granted) {
+      sendNotification({
+        title: 'Download Complete',
+        body: `${filename} has finished downloading.`,
+      });
+    }
+  } catch (e) {
+    console.error('Notification failed:', e);
+  }
 }
 
 export const useDownloadStore = create((set, get) => ({
   // ── State ──────────────────────────────────────
-  tasks: [],          // DownloadTask[]
-  stats: {},          // aggregated stats
-  connected: false,
+  tasks:           [],
+  stats:           {},
+  settings:        {},
+  connected:       false,
   connectionError: null,
-  selectedId: null,
-  filterStatus: 'all', // all | downloading | completed | paused | failed
+  selectedId:      null,
+  filterStatus:    'all',
 
   // ── Derived ────────────────────────────────────
   filteredTasks: () => {
@@ -64,6 +77,9 @@ export const useDownloadStore = create((set, get) => ({
     ws.onopen = () => {
       set({ connected: true, connectionError: null });
       clearTimeout(reconnectTimer);
+      // Apply saved theme on reconnect
+      const { settings } = get();
+      if (settings?.theme) applyTheme(settings.theme);
     };
 
     ws.onmessage = (e) => {
@@ -79,7 +95,6 @@ export const useDownloadStore = create((set, get) => ({
 
     ws.onclose = () => {
       set({ connected: false });
-      // Auto-reconnect every 3s
       reconnectTimer = setTimeout(() => get().connect(), 3000);
     };
   },
@@ -105,34 +120,48 @@ export const useDownloadStore = create((set, get) => ({
     if (msg.type === 'event') {
       const { event, data } = msg;
 
-      // FIX: init always replaces the full task list — never appends.
-      // This is the single source of truth on (re)connect.
       if (event === 'init') {
-        set({ tasks: data.tasks || [], stats: data.stats || {} });
+        set({
+          tasks:    data.tasks    || [],
+          stats:    data.stats    || {},
+          settings: data.settings || {},
+        });
+        // Apply theme from persisted settings immediately on init
+        if (data.settings?.theme) applyTheme(data.settings.theme);
         return;
       }
 
-      // FIX: upsert instead of blind prepend.
-      // The backend broadcasts task_added to ALL connected WS clients.
-      // With 2 sockets open (React StrictMode, two Tauri windows, etc.)
-      // the same task_added fires twice into the same Zustand store,
-      // producing a duplicate row. upsertTask checks by id first and
-      // merges instead of prepending when the task already exists.
       if (event === 'task_added') {
         set(s => ({ tasks: upsertTask(s.tasks, data) }));
         return;
       }
 
-      // task_progress and task_updated both just merge by id — no change needed.
       if (event === 'task_progress' || event === 'task_updated') {
-        set(s => ({
-          tasks: s.tasks.map(t => t.id === data.id ? { ...t, ...data } : t),
-        }));
+        set(s => {
+          const old = s.tasks.find(t => t.id === data.id);
+          if (
+            old &&
+            old.status !== 'completed' &&
+            data.status === 'completed' &&
+            s.settings?.notify_on_complete !== false
+          ) {
+            notifyComplete(data.filename || old.filename);
+          }
+          return {
+            tasks: s.tasks.map(t => t.id === data.id ? { ...t, ...data } : t),
+          };
+        });
         return;
       }
 
       if (event === 'task_removed') {
         set(s => ({ tasks: s.tasks.filter(t => t.id !== data.id) }));
+        return;
+      }
+
+      if (event === 'settings_updated') {
+        set({ settings: data });
+        applyTheme(data.theme);
         return;
       }
     }
@@ -148,7 +177,6 @@ export const useDownloadStore = create((set, get) => ({
       const id = nextId();
       pendingReplies[id] = { resolve, reject };
       ws.send(JSON.stringify({ cmd, data, id }));
-      // Timeout after 10s
       setTimeout(() => {
         if (pendingReplies[id]) {
           delete pendingReplies[id];
@@ -161,18 +189,21 @@ export const useDownloadStore = create((set, get) => ({
   addDownload: async (url, options = {}) => {
     return get()._send('add_download', {
       url,
-      save_dir: options.saveDir || '',
-      filename: options.filename || '',
-      connections: options.connections || 8,
+      save_dir:    options.saveDir    || '',
+      filename:    options.filename   || '',
+      connections: options.connections || 0,
     });
   },
 
   pauseDownload:  (id) => get()._send('pause',  { id }),
   resumeDownload: (id) => get()._send('resume', { id }),
-  retryDownload: (id) => get()._send('retry', { id }),
   cancelDownload: (id) => get()._send('cancel', { id }),
+  retryDownload:  (id) => get()._send('retry',  { id }),
   removeDownload: (id, deleteFile = false) =>
     get()._send('remove', { id, delete_file: deleteFile }),
+
+  getSettings:  ()       => get()._send('get_settings',  {}),
+  saveSettings: (data)   => get()._send('save_settings', data),
 
   // ── UI State ───────────────────────────────────
   setFilter:  (filterStatus) => set({ filterStatus }),

@@ -362,6 +362,7 @@ class DownloadEngine:
         Each segment is retried up to SEGMENT_RETRIES times on transient errors.
         Implements IDM's dynamic segment stealing when a segment finishes early.
         """
+        segment_retries = getattr(task, '_segment_retries', self.SEGMENT_RETRIES)
         lock = asyncio.Lock()
 
         async def download_segment(seg: Segment):
@@ -370,7 +371,7 @@ class DownloadEngine:
 
             pause_ev = self._pause_events[task.id]
 
-            for attempt in range(self.SEGMENT_RETRIES + 1):
+            for attempt in range(segment_retries + 1):
                 if self._cancel_flags.get(task.id):
                     return
 
@@ -466,7 +467,7 @@ class DownloadEngine:
                     if self._cancel_flags.get(task.id):
                         return
 
-                    if attempt < self.SEGMENT_RETRIES:
+                    if attempt < segment_retries:
                         wait = self.RETRY_BACKOFF[min(attempt, len(self.RETRY_BACKOFF) - 1)]
                         log.warning(
                             f"[{task.id}] seg{seg.index} error (attempt {attempt + 1}): {e}. "
@@ -476,7 +477,7 @@ class DownloadEngine:
                     else:
                         log.exception(
                             f"[{task.id}] seg{seg.index} failed after "
-                            f"{self.SEGMENT_RETRIES + 1} attempts: {e}"
+                            f"{segment_retries + 1} attempts: {e}"
                         )
                         raise
 
