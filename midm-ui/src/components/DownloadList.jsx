@@ -3,7 +3,7 @@ import { useDownloadStore, fmtBytes, fmtSpeed, fmtEta } from '../store/downloadS
 import {
   Download, Pause, Play, X, Trash2, FolderOpen,
   Film, Music, Archive, FileText, Image, Package, File,
-  Plus, RotateCcw, AlertTriangle
+  Plus, RotateCcw, AlertTriangle, CirclePlay
 } from 'lucide-react';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 
@@ -44,7 +44,7 @@ const STATUS_COLORS = {
 function DownloadCard({ task, onToast }) {
   const {
     pauseDownload, resumeDownload, cancelDownload,
-    removeDownload, retryDownload, selectTask, selectedId
+    removeDownload, retryDownload, startDownload, selectTask, selectedId
   } = useDownloadStore();
 
   const Icon = TYPE_ICONS[task.file_type] || File;
@@ -53,6 +53,7 @@ function DownloadCard({ task, onToast }) {
   const isPaused    = task.status === 'paused';
   const isDone      = task.status === 'completed';
   const isFailed    = task.status === 'failed';
+  const isQueued = task.status === 'queued';
   const isSelected  = selectedId === task.id;
 
   const progress = task.progress || 0;
@@ -142,6 +143,15 @@ function DownloadCard({ task, onToast }) {
         {isFailed && (
           <button className="action-btn retry" title="Retry" onClick={() => retryDownload(task.id)}>
             <RotateCcw size={14} />
+          </button>
+        )}
+        {isQueued && (
+          <button
+            className="action-btn start"
+            title="Start now"
+            onClick={() => startDownload(task.id)}
+          >
+            <CirclePlay size={14} />
           </button>
         )}
         {isDone && (

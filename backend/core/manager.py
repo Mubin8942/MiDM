@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional, Callable
 from urllib.parse import urlparse, unquote
 
-from .downloader import DownloadEngine, DownloadTask, DownloadStatus
+from .downloader import DownloadEngine, DownloadTask, DownloadStatus, Segment
 from .settings import SettingsManager
 
 
@@ -51,6 +51,8 @@ class DownloadManager:
         self._running = True
         self._load_state()
         asyncio.create_task(self._auto_remove_loop())
+        await asyncio.sleep(0.5)
+        await self._start_next_queued()
 
     async def stop(self):
         self._running = False
@@ -85,12 +87,20 @@ class DownloadManager:
         auto_retry = self.settings.get("auto_retry", True)
         max_retries = self.settings.get("max_retries", 3)
         task._segment_retries = max_retries if auto_retry else 0
+        task._speed_limit_kbps = self.settings.get("speed_limit_kbps", 0)
 
         self.tasks[task.id] = task
         await self._emit("task_added", task.to_dict())
         self._save_state()
         log.info(f"[{task.id}] Queued: {url}")
-        self._launch(task)
+        auto_start = self.settings.get("auto_start", True)
+        if auto_start:
+            self._launch(task)
+        else:
+            task.status = DownloadStatus.QUEUED
+            log.info(f"[{task.id}] Auto-start disabled — task queued")
+            await self._emit("task_updated", task.to_dict())
+
         return task
 
     async def pause_download(self, task_id: str):
@@ -139,6 +149,14 @@ class DownloadManager:
             log.warning(f"[{task_id}] retry_download: not failed (status={task.status})")
             return
         log.info(f"[{task_id}] Retrying failed download: {task.url}")
+
+        # Re-inject all runtime settings fresh from current config
+        auto_retry  = self.settings.get("auto_retry", True)
+        max_retries = self.settings.get("max_retries", 3)
+        task._segment_retries  = max_retries if auto_retry else 0
+        task._speed_limit_kbps = self.settings.get("speed_limit_kbps", 0)
+        task._auto_retry_count = 0  # reset so auto-retry works fresh
+
         task.status = DownloadStatus.QUEUED
         task.error = None
         task.speed = 0.0
@@ -147,13 +165,64 @@ class DownloadManager:
         auto_retry  = self.settings.get("auto_retry", True)
         max_retries = self.settings.get("max_retries", 3)
         task._segment_retries = max_retries if auto_retry else 0
+        task._speed_limit_kbps = self.settings.get("speed_limit_kbps", 0)
         for seg in task.segments:
             if not seg.done:
-                seg.speed = 0.0
+                tmp_path = os.path.join(
+                    os.path.expanduser("~"), ".midm", "tmp",
+                    f"{task.id}_seg{seg.index}.part"
+                )
+                if os.path.exists(tmp_path):
+                    actual_size = os.path.getsize(tmp_path)
+                    if actual_size != seg.file_bytes or actual_size == 0:
+                        # File is corrupt or mismatched — delete and restart this segment
+                        os.remove(tmp_path)
+                        seg.downloaded = 0
+                        seg.file_bytes = 0
+                        log.debug(
+                            f"[{task.id}] seg{seg.index} corrupt temp file "
+                            f"(expected {seg.file_bytes}, got {actual_size}) — deleted"
+                        )
+                    else:
+                        log.debug(
+                            f"[{task.id}] seg{seg.index} temp file OK "
+                            f"({actual_size} bytes) — resuming"
+                        )
+                else:
+                    seg.downloaded = 0
+                    seg.file_bytes = 0
+                    log.debug(
+                        f"[{task.id}] seg{seg.index} temp file missing "
+                        f"— reset downloaded to 0"
+                    )
 
+                await self._emit("task_updated", task.to_dict())
+                self._save_state()
+                self._launch(task)
+    
+    async def start_download(self, task_id: str):
+        """Manually start a queued task, bypassing the simultaneous limit check."""
+        task = self.tasks.get(task_id)
+        if not task:
+            log.warning(f"[{task_id}] start_download: task not found")
+            return
+        if task.status != DownloadStatus.QUEUED:
+            log.warning(f"[{task_id}] start_download: not queued (status={task.status})")
+            return
+
+        log.info(f"[{task_id}] Manually starting queued task")
+        # Launch directly, bypassing the simultaneous cap
+        # so the user's explicit intent is always respected
+        log.info(f"[{task_id}] Launching download coroutine (manual start)")
+        t = asyncio.create_task(self._run_download(task))
+        self._active_tasks[task_id] = t
+
+        def _on_done(fut):
+            self._active_tasks.pop(task_id, None)
+            asyncio.create_task(self._start_next_queued())
+
+        t.add_done_callback(_on_done)
         await self._emit("task_updated", task.to_dict())
-        self._save_state()
-        self._launch(task)
 
     async def cancel_download(self, task_id: str):
         task = self.tasks.get(task_id)
@@ -243,18 +312,63 @@ class DownloadManager:
 
     def _launch(self, task: DownloadTask):
         """
-        Create an asyncio.Task for one download and register it in
-        _active_tasks so resume_download can check whether it's still alive.
+        Launch a download only if under the simultaneous limit.
+        If over the limit, queue it — it will be picked up when
+        an active download finishes.
         """
+        max_sim = self.settings.get("max_simultaneous", 5)
+        active_count = sum(
+            1 for t in self.tasks.values()
+            if t.status in (
+                DownloadStatus.DOWNLOADING,
+                DownloadStatus.CONNECTING,
+                DownloadStatus.MERGING,
+            )
+        )
+
+        if active_count >= max_sim:
+            log.info(f"[{task.id}] Queued — max simultaneous ({max_sim}) reached")
+            task.status = DownloadStatus.QUEUED
+            return
+
         log.info(f"[{task.id}] Launching download coroutine")
         t = asyncio.create_task(self._run_download(task))
         self._active_tasks[task.id] = t
 
-        # Auto-remove from _active_tasks when done (keeps the dict lean)
         def _on_done(fut):
             self._active_tasks.pop(task.id, None)
+            # When a download finishes, try to start the next queued one
+            asyncio.create_task(self._start_next_queued())
 
         t.add_done_callback(_on_done)
+    
+    async def _start_next_queued(self):
+        """Pick the oldest queued task and launch it if under the limit."""
+        max_sim = self.settings.get("max_simultaneous", 5)
+        active_count = sum(
+            1 for t in self.tasks.values()
+            if t.status in (
+                DownloadStatus.DOWNLOADING,
+                DownloadStatus.CONNECTING,
+                DownloadStatus.MERGING,
+            )
+        )
+
+        if active_count >= max_sim:
+            return
+
+        # Find oldest queued task (by created_at)
+        queued = [
+            t for t in self.tasks.values()
+            if t.status == DownloadStatus.QUEUED
+        ]
+        if not queued:
+            return
+
+        next_task = min(queued, key=lambda t: t.created_at)
+        log.info(f"[{next_task.id}] Starting from queue")
+        self._launch(next_task)
+        await self._emit("task_updated", next_task.to_dict())
 
     async def _run_download(self, task: DownloadTask):
         """Drive a single download from start to finish."""
@@ -304,6 +418,21 @@ class DownloadManager:
                     self._save_state()
                     # Wait briefly before relaunching
                     await asyncio.sleep(3)
+                    for seg in getattr(task, 'segments', []):
+                        if not seg.done:
+                            tmp_path = os.path.join(
+                                os.path.expanduser("~"), ".midm", "tmp",
+                                f"{task.id}_seg{seg.index}.part"
+                            )
+                            if os.path.exists(tmp_path):
+                                actual_size = os.path.getsize(tmp_path)
+                                if actual_size != seg.file_bytes or actual_size == 0:
+                                    os.remove(tmp_path)
+                                    seg.downloaded = 0
+                                    seg.file_bytes = 0
+                            else:
+                                seg.downloaded = 0
+                                seg.file_bytes = 0
                     self._launch(task)
                 else:
                     task.status = DownloadStatus.FAILED
@@ -331,29 +460,92 @@ class DownloadManager:
         try:
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
             data = {tid: t.to_dict() for tid, t in self.tasks.items()}
-            STATE_FILE.write_text(json.dumps(data, indent=2))
+            tmp_file = STATE_FILE.with_suffix('.tmp')
+            tmp_file.write_text(json.dumps(data, indent=2), encoding='utf-8')
+            # Keep previous state as backup before replacing
+            if STATE_FILE.exists():
+                import shutil
+                shutil.copy(STATE_FILE, STATE_FILE.with_suffix('.bak'))
+            tmp_file.replace(STATE_FILE)
         except Exception as e:
             log.error(f"_save_state failed: {e}", exc_info=True)
 
     def _load_state(self):
-        if not STATE_FILE.exists():
-            return
-        try:
-            data = json.loads(STATE_FILE.read_text())
-            for tid, td in data.items():
-                status = DownloadStatus(td.get("status", "queued"))
-                if status in (DownloadStatus.DOWNLOADING, DownloadStatus.CONNECTING):
-                    td["status"] = DownloadStatus.PAUSED.value
-                    log.info(f"[{tid}] Restored as PAUSED (was {status.value})")
-                task = DownloadTask(**{
-                    k: v for k, v in td.items()
-                    if k in DownloadTask.__dataclass_fields__
-                })
-                self.tasks[tid] = task
-            log.info(f"Loaded {len(self.tasks)} task(s) from state file")
-        except Exception as e:
-            log.error(f"_load_state failed: {e}", exc_info=True)
+        # Try main state file first, then backup
+        for path in [STATE_FILE, STATE_FILE.with_suffix('.bak')]:
+            if not path.exists():
+                continue
+            try:
+                text = path.read_text(encoding='utf-8').strip()
+                if not text:
+                    log.warning(f"State file empty: {path} — skipping")
+                    continue
+                data = json.loads(text)
+                for tid, td in data.items():
+                    status = DownloadStatus(td.get("status", "queued"))
+                    if status in (DownloadStatus.DOWNLOADING,
+                                  DownloadStatus.CONNECTING,
+                                  DownloadStatus.MERGING):
+                        td["status"] = DownloadStatus.PAUSED.value
+                        log.info(f"[{tid}] Restored as PAUSED (was {status.value})")
+                    elif status == DownloadStatus.QUEUED:
+                        log.info(f"[{tid}] Restored as QUEUED")
+                    elif status == DownloadStatus.FAILED:
+                        log.info(f"[{tid}] Restored as FAILED — awaiting manual retry")
 
+                    raw_segments = td.get("segments", [])
+                    converted_segments = []
+                    for s in raw_segments:
+                        if isinstance(s, dict):
+                            converted_segments.append(Segment(
+                                index       = s.get("index", 0),
+                                start       = s.get("start", 0),
+                                end         = s.get("end", 0),
+                                downloaded  = s.get("downloaded", 0),
+                                speed       = s.get("speed", 0.0),
+                                done        = s.get("done", False),
+                                temp_path   = s.get("temp_path", ""),
+                                file_offset = s.get("file_offset", 0),
+                                file_bytes  = s.get("file_bytes", 0),
+                            ))
+                        else:
+                            converted_segments.append(s)
+
+                    task_fields = {
+                        k: v for k, v in td.items()
+                        if k in DownloadTask.__dataclass_fields__
+                    }
+                    task_fields["segments"] = converted_segments
+                    task = DownloadTask(**task_fields)
+
+                    # Re-inject runtime settings lost on restart
+                    auto_retry  = self.settings.get("auto_retry", True)
+                    max_retries = self.settings.get("max_retries", 3)
+                    task._segment_retries  = max_retries if auto_retry else 0
+                    task._speed_limit_kbps = self.settings.get("speed_limit_kbps", 0)
+                    task._auto_retry_count = 0
+
+                    if task.status in (DownloadStatus.FAILED, DownloadStatus.PAUSED):
+                        for seg in task.segments:
+                            if hasattr(seg, 'speed'):
+                                seg.speed = 0.0
+                        task.speed = 0.0
+                        task.eta   = 0.0
+
+                    self.tasks[tid] = task
+
+                log.info(f"Loaded {len(self.tasks)} task(s) from {path.name}")
+                # If we loaded from backup, restore it as main
+                if path != STATE_FILE:
+                    import shutil
+                    shutil.copy(path, STATE_FILE)
+                    log.info("Restored state from backup file")
+                return  # success — stop trying
+            except Exception as e:
+                log.error(f"_load_state failed for {path}: {e}", exc_info=True)
+                continue
+
+        log.warning("No valid state file found — starting fresh")
     # ─────────────────────────────────────────────
     # Utilities
     # ─────────────────────────────────────────────

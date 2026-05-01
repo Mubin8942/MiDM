@@ -161,6 +161,10 @@ class MiDMServer:
             elif cmd == "retry":
                 await self._manager.retry_download(data["id"])
                 result = {"ok": True}
+            
+            elif cmd == "start":
+                await self._manager.start_download(data["id"])
+                result = {"ok": True}
 
             elif cmd == "get_settings":
                 result = self._manager.get_settings()

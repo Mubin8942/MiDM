@@ -38,6 +38,8 @@ class Segment:
     speed: float = 0.0
     done: bool = False
     temp_path: str = ""
+    file_offset: int = 0
+    file_bytes: int = 0
 
     @property
     def remaining(self) -> int:
@@ -194,7 +196,8 @@ class DownloadEngine:
                 await self._notify(task)
 
                 # Step 3: Download all segments concurrently
-                await self._download_all(session, task)
+                speed_limit = getattr(task, '_speed_limit_kbps', 0)
+                await self._download_all(session, task, speed_limit)
 
                 if self._cancel_flags.get(task.id):
                     task.status = DownloadStatus.CANCELLED
@@ -356,13 +359,16 @@ class DownloadEngine:
                 temp_path=self._temp_path(task, i),
             ))
 
-    async def _download_all(self, session: aiohttp.ClientSession, task: DownloadTask):
+    async def _download_all(self, session: aiohttp.ClientSession, task: DownloadTask, speed_limit_kbps: float = 0):
         """
         Download all segments in parallel.
         Each segment is retried up to SEGMENT_RETRIES times on transient errors.
         Implements IDM's dynamic segment stealing when a segment finishes early.
         """
         segment_retries = getattr(task, '_segment_retries', self.SEGMENT_RETRIES)
+        num_segs = max(len(task.segments), 1)
+        seg_limit_kbps = (speed_limit_kbps / num_segs) if speed_limit_kbps > 0 else 0
+        seg_limit_bps  = seg_limit_kbps * 1024
         lock = asyncio.Lock()
 
         async def download_segment(seg: Segment):
@@ -419,20 +425,67 @@ class DownloadEngine:
                             )
 
                         # ── Stream to temp file ──────────────────────────
-                        mode = "ab" if seg.downloaded > 0 else "wb"
+                        temp_exists = os.path.exists(seg.temp_path)
+                        if temp_exists and seg.file_bytes > 0:
+                            # Verify actual file size matches what we recorded
+                            actual_file_size = os.path.getsize(seg.temp_path)
+                            if actual_file_size != seg.file_bytes:
+                                log.warning(
+                                    f"[{task.id}] seg{seg.index} file size mismatch: "
+                                    f"expected {seg.file_bytes} but found {actual_file_size} "
+                                    f"— deleting and restarting segment"
+                                )
+                                os.remove(seg.temp_path)
+                                seg.downloaded = 0
+                                seg.file_bytes = 0
+                                mode = "wb"
+                        elif seg.downloaded > 0 and temp_exists:
+                            mode = "ab"
+                        else:
+                            mode = "wb"
+                            seg.file_bytes = 0  # reset on fresh write
                         async with aiofiles.open(seg.temp_path, mode) as f:
                             t_last = time.monotonic()
                             bytes_since = 0
 
-                            async for chunk in resp.content.iter_chunked(self.CHUNK_SIZE):
+                            STALL_TIMEOUT = 30  # seconds without data = stalled
+
+                            async def read_chunk_with_timeout():
+                                try:
+                                    return await asyncio.wait_for(
+                                        resp.content.read(self.CHUNK_SIZE),
+                                        timeout=STALL_TIMEOUT
+                                    )
+                                except asyncio.TimeoutError:
+                                    raise aiohttp.ServerTimeoutError(
+                                        f"seg{seg.index} stalled — "
+                                        f"no data for {STALL_TIMEOUT}s"
+                                    )
+
+                            while True:
                                 if self._cancel_flags.get(task.id):
                                     return
 
                                 await pause_ev.wait()   # block while paused
 
+                                chunk = await read_chunk_with_timeout()
+                                if not chunk:
+                                    break  # stream ended
+
+                                # Cap chunk to not exceed seg.end
+                                # (seg.end may have been trimmed by steal)
+                                if task.supports_resume:
+                                    max_bytes = (seg.end - seg.start + 1) - seg.downloaded
+                                    if max_bytes <= 0:
+                                        break  # we've hit the trimmed end
+                                    if len(chunk) > max_bytes:
+                                        chunk = chunk[:max_bytes]
+
+                                chunk_start = time.monotonic()
                                 await f.write(chunk)
                                 n = len(chunk)
                                 seg.downloaded += n
+                                seg.file_bytes += n 
                                 bytes_since += n
 
                                 now = time.monotonic()
@@ -445,12 +498,39 @@ class DownloadEngine:
                                         await self._update_stats(task)
                                         await self._notify(task)
 
+                                # ── Speed limiting ──────────────────────────────
+                                if seg_limit_bps > 0:
+                                    expected = n / seg_limit_bps
+                                    actual   = time.monotonic() - chunk_start
+                                    if expected > actual:
+                                        await asyncio.sleep(expected - actual)
+
+                        expected_bytes = seg.end - seg.start + 1
+                        if seg.downloaded > expected_bytes:
+                            overshoot = seg.downloaded - expected_bytes
+                            log.warning(
+                                f"[{task.id}] seg{seg.index} overshot by "
+                                f"{overshoot} bytes — truncating temp file"
+                            )
+                            # Truncate the file to the correct size
+                            correct_size = seg.file_bytes - overshoot
+                            try:
+                                with open(seg.temp_path, "r+b") as f_fix:
+                                    f_fix.truncate(correct_size)
+                                seg.downloaded = expected_bytes
+                                seg.file_bytes = correct_size
+                            except Exception as trunc_err:
+                                log.error(
+                                    f"[{task.id}] seg{seg.index} "
+                                    f"truncation failed: {trunc_err}"
+                                )
+
                         seg.done = True
                         log.debug(f"[{task.id}] seg{seg.index} done ({seg.downloaded} bytes)")
 
                         # Try to steal half of largest remaining segment
                         async with lock:
-                            stolen = self._try_steal(task, seg)
+                            stolen = self._try_steal(task, seg) if task.supports_resume else None
 
                         if stolen:
                             log.debug(
@@ -486,18 +566,40 @@ class DownloadEngine:
 
     def _try_steal(self, task: DownloadTask, finished_seg: Segment) -> Optional[Segment]:
         """
-        IDM's core: find the segment with the most bytes remaining,
-        split it in half, and return the new second-half segment.
+        Split the segment with the most bytes remaining.
+        Only steal if the victim has enough remaining AND its current_pos
+        hasn't passed the midpoint yet — otherwise the victim will
+        download past the split point before we can stop it.
         """
-        candidates = [
-            s for s in task.segments
-            if not s.done and s.remaining > self.MIN_SEGMENT_SIZE * 2
-        ]
+        candidates = []
+        for s in task.segments:
+            if s.done:
+                continue
+            remaining = s.remaining
+            if remaining <= self.MIN_SEGMENT_SIZE * 2:
+                continue
+            # Split point is the midpoint of what's LEFT to download
+            split_at = s.current_pos + (remaining // 2)
+            # Only steal if the split leaves meaningful work for both sides
+            # and the victim hasn't already passed the split
+            if split_at <= s.current_pos:
+                continue
+            if split_at >= s.end:
+                continue
+            # Ensure both halves are large enough to be worth stealing
+            victim_remaining_after = split_at - s.current_pos
+            stolen_size = s.end - split_at + 1
+            if victim_remaining_after < self.MIN_SEGMENT_SIZE:
+                continue
+            if stolen_size < self.MIN_SEGMENT_SIZE:
+                continue
+            candidates.append((s, split_at, stolen_size))
+
         if not candidates:
             return None
 
-        victim = max(candidates, key=lambda s: s.remaining)
-        split_at = victim.current_pos + (victim.remaining // 2)
+        # Pick the candidate with the most stolen bytes
+        victim, split_at, _ = max(candidates, key=lambda x: x[2])
 
         new_index = max(s.index for s in task.segments) + 1
         new_seg = Segment(
@@ -505,13 +607,31 @@ class DownloadEngine:
             start=split_at,
             end=victim.end,
             temp_path=self._temp_path(task, new_index),
+            file_offset=0,
+            file_bytes=0,
         )
+
+        # Trim victim's end — it will stop naturally when it reaches split_at - 1
+        old_end = victim.end
         victim.end = split_at - 1
+
+        # Final sanity check
+        if victim.end < victim.current_pos:
+            log.debug(f"[{task.id}] steal skipped — victim range collapsed after trim")
+            victim.end = old_end
+            return None
+
+        log.debug(
+            f"[{task.id}] steal: seg{victim.index} "
+            f"trimmed end {old_end}→{victim.end}, "
+            f"new seg{new_index} takes {split_at}-{new_seg.end}"
+        )
         task.segments.append(new_seg)
         return new_seg
 
     async def _update_stats(self, task: DownloadTask):
-        task.downloaded = sum(s.downloaded for s in task.segments)
+        raw = sum(s.downloaded for s in task.segments)
+        task.downloaded = min(raw, task.total_size) if task.total_size > 0 else raw
         task.speed = sum(s.speed for s in task.segments if not s.done)
         remaining = task.total_size - task.downloaded
         task.eta = (remaining / task.speed) if task.speed > 0 and remaining > 0 else 0.0
@@ -521,27 +641,77 @@ class DownloadEngine:
         os.makedirs(task.save_dir, exist_ok=True)
         ordered = sorted(task.segments, key=lambda s: s.start)
 
-        async with aiofiles.open(task.save_path, "wb") as out:
+        # Write to a temp output file first — never touch the final path
+        # until we've verified the merge is correct
+        tmp_out = task.save_path + ".merging"
+
+        try:
+            async with aiofiles.open(tmp_out, "wb") as out:
+                for seg in ordered:
+                    if os.path.exists(seg.temp_path):
+                        async with aiofiles.open(seg.temp_path, "rb") as f:
+                            if seg.file_offset > 0:
+                                await f.seek(seg.file_offset)
+                            while True:
+                                chunk = await f.read(self.CHUNK_SIZE * 256)
+                                if not chunk:
+                                    break
+                                await out.write(chunk)
+                    else:
+                        log.warning(
+                            f"[{task.id}] Missing temp file for "
+                            f"seg{seg.index}: {seg.temp_path}"
+                        )
+
+            # Verify size BEFORE deleting anything
+            if task.total_size > 0:
+                actual_size = os.path.getsize(tmp_out)
+                if actual_size != task.total_size:
+                    # Delete the bad output — keep .part files intact for retry
+                    os.remove(tmp_out)
+                    raise RuntimeError(
+                        f"Merge verification failed: expected {task.total_size} bytes "
+                        f"but got {actual_size} bytes — keeping temp files for retry."
+                    )
+                log.info(
+                    f"[{task.id}] ✓ Merge verified: "
+                    f"{actual_size} bytes match expected"
+                )
+
+            # Verification passed — rename to final path
+            if os.path.exists(task.save_path):
+                os.remove(task.save_path)
+            os.rename(tmp_out, task.save_path)
+
+            # NOW safe to delete temp segment files
             for seg in ordered:
-                if os.path.exists(seg.temp_path):
-                    async with aiofiles.open(seg.temp_path, "rb") as f:
-                        while True:
-                            chunk = await f.read(self.CHUNK_SIZE * 4)
-                            if not chunk:
-                                break
-                            await out.write(chunk)
-                    await asyncio.sleep(0.1)
+                try:
+                    if os.path.exists(seg.temp_path):
+                        await asyncio.sleep(0.05)
+                        os.remove(seg.temp_path)
+                except PermissionError:
+                    await asyncio.sleep(0.5)
                     try:
                         os.remove(seg.temp_path)
-                    except PermissionError:
-                        await asyncio.sleep(0.5)
-                        os.remove(seg.temp_path)
-                else:
-                    log.warning(
-                        f"[{task.id}] Missing temp file for seg{seg.index}: {seg.temp_path}"
-                    )
+                    except Exception as e:
+                        log.warning(
+                            f"[{task.id}] Could not remove "
+                            f"{seg.temp_path}: {e}"
+                        )
 
-        # Clean up ~/.midm/tmp if it is now empty
+        except RuntimeError:
+            raise  # re-raise verification errors — .part files still intact
+
+        except Exception as e:
+            # Clean up partial output on unexpected errors
+            if os.path.exists(tmp_out):
+                try:
+                    os.remove(tmp_out)
+                except Exception:
+                    pass
+            raise
+
+        # Clean up ~/.midm/tmp if empty
         try:
             tmp_dir = os.path.join(os.path.expanduser("~"), ".midm", "tmp")
             if os.path.isdir(tmp_dir) and not os.listdir(tmp_dir):
