@@ -64,6 +64,7 @@ class DownloadTask:
     eta: float = 0.0
     created_at: float = field(default_factory=time.time)
     completed_at: Optional[float] = None
+    started_at: Optional[float] = None
     error: Optional[str] = None
     supports_resume: bool = False
     num_connections: int = 8
@@ -193,6 +194,8 @@ class DownloadEngine:
                 log.info(f"[{task.id}] {len(task.segments)} segment(s) planned")
 
                 task.status = DownloadStatus.DOWNLOADING
+                if not task.started_at:
+                    task.started_at = time.time()
                 await self._notify(task)
 
                 # Step 3: Download all segments concurrently
@@ -220,9 +223,13 @@ class DownloadEngine:
                 log.info(f"[{task.id}] ✓ Completed: {task.filename}")
 
         except asyncio.CancelledError:
-            task.status = DownloadStatus.CANCELLED
-            await self._notify(task)
             log.info(f"[{task.id}] CancelledError caught in _run")
+            # Only brand as CANCELLED for real user cancels, not app shutdown.
+            # Check the cancel_flag: engine.cancel() sets it True;
+            # a bare asyncio task cancellation (shutdown) does not.
+            if self._cancel_flags.get(task.id):
+                task.status = DownloadStatus.CANCELLED
+                await self._notify(task)
 
         except Exception as e:
             task.status = DownloadStatus.FAILED
@@ -427,7 +434,6 @@ class DownloadEngine:
                         # ── Stream to temp file ──────────────────────────
                         temp_exists = os.path.exists(seg.temp_path)
                         if temp_exists and seg.file_bytes > 0:
-                            # Verify actual file size matches what we recorded
                             actual_file_size = os.path.getsize(seg.temp_path)
                             if actual_file_size != seg.file_bytes:
                                 log.warning(
@@ -439,11 +445,13 @@ class DownloadEngine:
                                 seg.downloaded = 0
                                 seg.file_bytes = 0
                                 mode = "wb"
+                            else:
+                                mode = "ab"
                         elif seg.downloaded > 0 and temp_exists:
                             mode = "ab"
                         else:
                             mode = "wb"
-                            seg.file_bytes = 0  # reset on fresh write
+                            seg.file_bytes = 0
                         async with aiofiles.open(seg.temp_path, mode) as f:
                             t_last = time.monotonic()
                             bytes_since = 0

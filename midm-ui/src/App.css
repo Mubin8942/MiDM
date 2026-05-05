@@ -104,6 +104,8 @@ html, body, #root { height: 100%; font-family: var(--font); font-size: 13px; col
 .stat-pct { color:var(--text); font-weight:500; }
 .stat-speed { color:var(--accent); }
 .stat-error { color:var(--red); font-family:var(--font); }
+.stat-timestamps { color: var(--text-dim); font-family: var(--font-mono);}
+.ts-sep { color: var(--text-muted); margin: 0 4px; }
 .stat-threads { color:var(--text-muted); margin-left:auto; }
 .seg-bars { display:flex; gap:2px; height:12px; align-items:flex-end; }
 .seg-bar-wrap { flex:1; height:100%; background:var(--bg4); border-radius:2px; overflow:hidden; display:flex; align-items:flex-end; }

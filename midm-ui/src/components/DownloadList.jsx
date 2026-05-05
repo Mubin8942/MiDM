@@ -41,6 +41,26 @@ const STATUS_COLORS = {
 };
 
 // ─── Download Card ───────────────────────────────────────────────────────────
+function fmtDate(ts) {
+  if (!ts) return '';
+  return new Date(ts * 1000).toLocaleDateString(undefined, {
+    month: 'short', day: 'numeric', year: 'numeric'
+  });
+}
+function fmtTime(ts) {
+  if (!ts) return '';
+  return new Date(ts * 1000).toLocaleTimeString(undefined, {
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+}
+function fmtDuration(startTs, endTs) {
+  if (!startTs || !endTs) return '';
+  const s = Math.round(endTs - startTs);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60), r = s % 60;
+  return r > 0 ? `${m}m ${r}s` : `${m}m`;
+}
+
 function DownloadCard({ task, onToast }) {
   const {
     pauseDownload, resumeDownload, cancelDownload,
@@ -53,6 +73,7 @@ function DownloadCard({ task, onToast }) {
   const isPaused    = task.status === 'paused';
   const isDone      = task.status === 'completed';
   const isFailed    = task.status === 'failed';
+  const isCancelled = task.status === 'cancelled';
   const isQueued = task.status === 'queued';
   const isSelected  = selectedId === task.id;
 
@@ -119,6 +140,15 @@ function DownloadCard({ task, onToast }) {
             </>
           )}
           {isFailed && <span className="stat-error">{task.error}</span>}
+          {isDone && task.started_at && (
+            <span className="stat-timestamps">
+              {fmtDate(task.completed_at)}
+              <span className="ts-sep">·</span>
+              {fmtTime(task.started_at)}–{fmtTime(task.completed_at)}
+              <span className="ts-sep">·</span>
+              {fmtDuration(task.started_at, task.completed_at)}
+            </span>
+          )}
           <span className="stat-threads">
             {(task.segments || []).length > 0 && `${(task.segments || []).length} threads`}
           </span>
@@ -159,7 +189,7 @@ function DownloadCard({ task, onToast }) {
             <FolderOpen size={14} />
           </button>
         )}
-        {!isDone && !isFailed && (
+        {!isDone && !isFailed && !isCancelled && (
           <button className="action-btn danger" title="Cancel" onClick={() => cancelDownload(task.id)}>
             <X size={14} />
           </button>

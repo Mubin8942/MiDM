@@ -42,6 +42,8 @@ class DownloadManager:
         # key = task.id, value = asyncio.Task
         self._active_tasks: dict[str, asyncio.Task] = {}
         self.settings = SettingsManager()
+        self._save_pending = False
+        self._state_write_lock = asyncio.Lock()
 
     # ─────────────────────────────────────────────
     # Lifecycle
@@ -56,8 +58,19 @@ class DownloadManager:
 
     async def stop(self):
         self._running = False
-        self._save_state()
-
+        for task in self.tasks.values():
+            if task.status in (
+                DownloadStatus.DOWNLOADING,
+                DownloadStatus.CONNECTING,
+                DownloadStatus.MERGING,
+            ):
+                task.status = DownloadStatus.PAUSED
+                task.speed = 0.0
+                task.eta   = 0.0
+        async with self._state_write_lock:
+            self._save_pending = False
+            self._save_state() 
+    
     # ─────────────────────────────────────────────
     # Public API
     # ─────────────────────────────────────────────
@@ -123,17 +136,23 @@ class DownloadManager:
         active = self._active_tasks.get(task_id)
 
         if active and not active.done():
-            # Original coroutine is still alive — just unpause it.
-            # Do NOT launch a second _run(); that would cause two coroutines
-            # writing to the same .part files simultaneously.
             log.info(f"[{task_id}] Resuming existing coroutine (still alive)")
             self._engine.resume(task_id)
             task.status = DownloadStatus.DOWNLOADING
             await self._emit("task_updated", task.to_dict())
         else:
-            # Original coroutine is gone — safe to launch a fresh one.
+            # Make absolutely sure no stale coroutine is running
+            # before launching a new one
+            if active:
+                try:
+                    active.cancel()
+                    await asyncio.sleep(0.1)
+                except Exception:
+                    pass
+            self._active_tasks.pop(task_id, None)
+
             log.info(f"[{task_id}] Original coroutine gone, launching fresh _run")
-            self._engine.resume(task_id)   # clear any stale pause flag
+            self._engine.resume(task_id)   # clear stale pause flag
             task.status = DownloadStatus.QUEUED
             await self._emit("task_updated", task.to_dict())
             self._launch(task)
@@ -316,6 +335,10 @@ class DownloadManager:
         If over the limit, queue it — it will be picked up when
         an active download finishes.
         """
+        existing = self._active_tasks.get(task.id)
+        if existing and not existing.done():
+            log.warning(f"[{task.id}] _launch called but coroutine already running — skipping")
+            return
         max_sim = self.settings.get("max_simultaneous", 5)
         active_count = sum(
             1 for t in self.tasks.values()
@@ -384,9 +407,13 @@ class DownloadManager:
 
         except asyncio.CancelledError:
             log.info(f"[{task.id}] Download cancelled (CancelledError)")
-            if task.status not in (DownloadStatus.CANCELLED, DownloadStatus.COMPLETED):
-                task.status = DownloadStatus.CANCELLED
-                await self._emit("task_updated", task.to_dict())
+            # Only mark CANCELLED if the user explicitly cancelled.
+            # If the app is shutting down (_running=False), stop() already
+            # wrote PAUSED to disk — don't overwrite it with CANCELLED.
+            if self._running:   # only a real user cancel, not app shutdown
+                if task.status not in (DownloadStatus.CANCELLED, DownloadStatus.COMPLETED):
+                    task.status = DownloadStatus.CANCELLED
+                    await self._emit("task_updated", task.to_dict())
 
         except Exception as e:
             log.exception(f"[{task.id}] Download failed: {e}")
@@ -452,6 +479,16 @@ class DownloadManager:
             except Exception as e:
                 log.error(f"_emit({event}) callback raised: {e}", exc_info=True)
 
+    async def _schedule_save(self):
+        """Debounce rapid save calls — collapses bursts into one write."""
+        if self._save_pending:
+            return
+        self._save_pending = True
+        await asyncio.sleep(0.3)
+        async with self._state_write_lock:
+            self._save_pending = False
+            self._save_state()
+
     # ─────────────────────────────────────────────
     # Persistence
     # ─────────────────────────────────────────────
@@ -462,13 +499,31 @@ class DownloadManager:
             data = {tid: t.to_dict() for tid, t in self.tasks.items()}
             tmp_file = STATE_FILE.with_suffix('.tmp')
             tmp_file.write_text(json.dumps(data, indent=2), encoding='utf-8')
-            # Keep previous state as backup before replacing
+
             if STATE_FILE.exists():
-                import shutil
-                shutil.copy(STATE_FILE, STATE_FILE.with_suffix('.bak'))
-            tmp_file.replace(STATE_FILE)
+                bak = STATE_FILE.with_suffix('.bak')
+                try:
+                    bak.write_bytes(STATE_FILE.read_bytes())
+                except Exception as e:
+                    log.warning(f"_save_state: could not write backup: {e}")
+
+            # Windows-safe: delete target before rename to avoid WinError 5
+            if STATE_FILE.exists():
+                try:
+                    STATE_FILE.unlink()
+                except Exception as e:
+                    log.warning(f"_save_state: could not unlink state.json: {e}")
+
+            tmp_file.rename(STATE_FILE)
+
         except Exception as e:
             log.error(f"_save_state failed: {e}", exc_info=True)
+            try:
+                tmp_file = STATE_FILE.with_suffix('.tmp')
+                if tmp_file.exists():
+                    tmp_file.unlink()
+            except Exception:
+                pass
 
     def _load_state(self):
         # Try main state file first, then backup
@@ -516,6 +571,7 @@ class DownloadManager:
                         if k in DownloadTask.__dataclass_fields__
                     }
                     task_fields["segments"] = converted_segments
+                    task_fields.setdefault("started_at", None)
                     task = DownloadTask(**task_fields)
 
                     # Re-inject runtime settings lost on restart
