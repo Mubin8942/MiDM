@@ -1,5 +1,6 @@
 import { Download, Plus, Settings, Minus, Square, X } from 'lucide-react';
 import { useDownloadStore, fmtSpeed } from '../store/downloadStore';
+import logo from '../../src-tauri/icons/logo.png';
 
 export default function TitleBar({ onAdd }) {
   const { connected, tasks } = useDownloadStore();
@@ -21,7 +22,7 @@ export default function TitleBar({ onAdd }) {
     <header className="titlebar" data-tauri-drag-region>
       <div className="titlebar-left">
         <div className="app-logo">
-          <Download size={16} strokeWidth={2.5} />
+          <img src={logo} alt="MiDM" />
         </div>
         <span className="app-name">MiDM</span>
         <div className={`conn-pill ${connected ? 'conn-on' : 'conn-off'}`}>

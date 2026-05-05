@@ -39,8 +39,17 @@ html, body, #root { height: 100%; font-family: var(--font); font-size: 13px; col
 
 /* TitleBar */
 .titlebar { display: flex; align-items: center; height: var(--titlebar-h); background: var(--bg2); border-bottom: 1px solid var(--border); padding: 0 8px 0 12px; flex-shrink: 0; -webkit-app-region: drag; gap: 12px; }
-.titlebar-left { display: flex; align-items: center; gap: 8px; -webkit-app-region: no-drag; }
-.app-logo { width: 26px; height: 26px; border-radius: var(--radius-sm); background: linear-gradient(135deg, var(--accent), var(--accent2)); display: flex; align-items: center; justify-content: center; color: white; flex-shrink: 0; }
+.titlebar-left { display: flex; align-items: center; gap: 2px; -webkit-app-region: no-drag; }
+.app-logo img {
+  width: 30px;
+  height: 25px;
+  object-fit: contain;
+  border-radius: 4px;
+}
+
+[data-theme="light"] .app-logo img {
+  mix-blend-mode: multiply;
+}
 .app-name { font-weight: 600; font-size: 14px; letter-spacing: 0.05em; }
 .conn-pill { display: flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 99px; font-size: 11px; font-family: var(--font-mono); font-weight: 500; border: 1px solid; }
 .conn-on { background: #22c55e14; border-color: #22c55e40; color: var(--green); }
