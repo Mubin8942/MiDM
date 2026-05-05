@@ -13,7 +13,7 @@ export default function StatusBar() {
     <footer className="statusbar">
       <div className="statusbar-left">
         <div className={`status-dot ${connected ? 'on' : 'off'}`} />
-        <span>{connected ? 'Engine Connected' : 'Engine Offline'}</span>
+        <span>{connected ? 'Turbo Engine Connected' : 'Turbo Engine Offline'}</span>
       </div>
 
       <div className="statusbar-center">

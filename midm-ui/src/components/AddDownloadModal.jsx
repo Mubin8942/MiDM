@@ -17,7 +17,7 @@ async function pickFolder() {
 }
 
 export default function AddDownloadModal({ onClose }) {
-  const { addDownload } = useDownloadStore();
+  const { addDownload, settings } = useDownloadStore();
   const [url, setUrl] = useState('');
   const [saveDir, setSaveDir] = useState('');
   const [filename, setFilename] = useState('');
@@ -109,7 +109,7 @@ export default function AddDownloadModal({ onClose }) {
                 <div className="input-with-btn">
                   <input
                     type="text"
-                    placeholder="Default: ~/Downloads"
+                    placeholder={`${settings?.save_dir || '~/Downloads'}`}
                     value={saveDir}
                     onChange={e => setSaveDir(e.target.value)}
                     spellCheck={false}
@@ -124,6 +124,7 @@ export default function AddDownloadModal({ onClose }) {
                     Browse
                   </button>
                 </div>
+                {settings?.save_dir && <span className="field-hint">Default: {settings.save_dir}</span>}
               </div>
 
               {/* Custom filename */}

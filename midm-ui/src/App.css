@@ -151,6 +151,7 @@ html, body, #root { height: 100%; font-family: var(--font); font-size: 13px; col
 .field input:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-glow); }
 .field input.has-error { border-color:var(--red); box-shadow:0 0 0 3px #ef444420; }
 .field-error { font-size:11px; color:var(--red); }
+.field-hint { display: block; font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); margin-top: 4px; }
 .range-input {
   appearance: none;
   -webkit-appearance: none;
