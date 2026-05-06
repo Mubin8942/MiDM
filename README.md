@@ -145,3 +145,9 @@ GET  /stats       → aggregated stats
 - [ ] Phase 5: Scheduler (download at night, speed limits)
 - [ ] Phase 6: System tray icon
 - [ ] Phase 7: Auto-update
+
+## License
+
+Copyright 2026 Mohaimenul Islam Mubin
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](./LICENSE) for details.
