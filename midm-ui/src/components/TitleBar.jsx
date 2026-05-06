@@ -1,6 +1,8 @@
 import { Download, Plus, Settings, Minus, Square, X } from 'lucide-react';
 import { useDownloadStore, fmtSpeed } from '../store/downloadStore';
 import logo from '../../src-tauri/icons/logo.png';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
 
 export default function TitleBar({ onAdd }) {
   const { connected, tasks } = useDownloadStore();
@@ -8,14 +10,31 @@ export default function TitleBar({ onAdd }) {
     .filter(t => t.status === 'downloading')
     .reduce((s, t) => s + (t.speed || 0), 0);
 
-  const handleClose = () => {
-    if (window.__TAURI__) window.__TAURI__.window.getCurrent().close();
+  const handleClose = async () => {
+    try {
+      const win = getCurrentWindow();
+      await win.close();
+    } catch(e) {
+      console.error('close failed:', e);
+    }
   };
-  const handleMin = () => {
-    if (window.__TAURI__) window.__TAURI__.window.getCurrent().minimize();
+
+  const handleMin = async () => {
+    try {
+      const win = getCurrentWindow();
+      await win.minimize();
+    } catch(e) {
+      console.error('minimize failed:', e);
+    }
   };
-  const handleMax = () => {
-    if (window.__TAURI__) window.__TAURI__.window.getCurrent().toggleMaximize();
+
+  const handleMax = async () => {
+    try {
+      const win = getCurrentWindow();
+      await win.toggleMaximize();
+    } catch(e) {
+      console.error('maximize failed:', e);
+    }
   };
 
   return (

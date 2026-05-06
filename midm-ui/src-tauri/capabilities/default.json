@@ -10,6 +10,10 @@
     "opener:allow-reveal-item-in-dir",
     "opener:allow-open-path",
     "notification:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-start-dragging",
     "dialog:allow-open"
   ]
 }
