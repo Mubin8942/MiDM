@@ -24,12 +24,8 @@
     }
   },
   "bundle": {
-    "resources": ["midm-backend.exe"],
     "active": true,
     "targets": "all",
-    "icon": [
-      "icons/icon.ico",
-      "icons/icon.png"
-    ]
+    "icon": []
   }
 }

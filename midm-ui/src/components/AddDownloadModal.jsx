@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { X, Download, Link, FolderOpen, Sliders } from 'lucide-react';
 import { useDownloadStore } from '../store/downloadStore';
-import { open } from '@tauri-apps/plugin-dialog';  // ← this was missing
+import { open } from '@tauri-apps/plugin-dialog';
 
 async function pickFolder() {
   try {
@@ -29,9 +29,14 @@ export default function AddDownloadModal({ onClose }) {
 
   useEffect(() => {
     inputRef.current?.focus();
-    navigator.clipboard?.readText().then(text => {
-      if (text?.startsWith('http')) setUrl(text.trim());
-    }).catch(() => {});
+    const pasteUrl = async () => {
+      try {
+        const { readText } = await import('@tauri-apps/plugin-clipboard-manager');
+        const text = await readText();
+        if (text?.startsWith('http')) setUrl(text.trim());
+      } catch {}
+    };
+    pasteUrl();
   }, []);
 
   useEffect(() => {
@@ -124,7 +129,9 @@ export default function AddDownloadModal({ onClose }) {
                     Browse
                   </button>
                 </div>
-                {settings?.save_dir && <span className="field-hint">Default: {settings.save_dir}</span>}
+                {settings?.save_dir && (
+                  <span className="field-hint">Default: {settings.save_dir}</span>
+                )}
               </div>
 
               {/* Custom filename */}

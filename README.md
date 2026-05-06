@@ -15,6 +15,7 @@ MiDM/
 │   ├── core/
 │   │   ├── downloader.py     # IDM-style dynamic segment engine
 │   │   └── manager.py        # Queue, state persistence, scheduling
+|   |   └── settings.py 
 │   └── server.py             # WebSocket + HTTP bridge to UI
 │
 ├── midm-ui/                  # Tauri + React frontend
@@ -24,6 +25,8 @@ MiDM/
 │   │   │   ├── Sidebar.jsx
 │   │   │   ├── DownloadList.jsx
 │   │   │   └── AddDownloadModal.jsx
+|   |   |   └── SettingsModal.jsx
+|   |   |   └── Statusbar.jsx
 │   │   ├── store/
 │   │   │   └── downloadStore.js   # Zustand + WebSocket state
 │   │   ├── App.jsx
@@ -44,6 +47,7 @@ MiDM/
 |------|---------|----------|
 | Python | 3.11+ | https://python.org |
 | Node.js | 18+ | https://nodejs.org |
+| NPM  | 11+   | https://npmjs.com  |
 | Rust | latest | https://rustup.rs |
 | VS Build Tools | 2019+ | https://visualstudio.microsoft.com/visual-cpp-build-tools/ |
 
