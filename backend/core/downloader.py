@@ -382,6 +382,31 @@ class DownloadEngine:
             if seg.done:
                 return
 
+            if os.path.exists(seg.temp_path):
+                actual = os.path.getsize(seg.temp_path)
+                if actual == 0 and seg.downloaded > 0:
+                    # Empty file — full restart for this segment
+                    os.remove(seg.temp_path)
+                    seg.downloaded = 0
+                    seg.file_bytes = 0
+                    log.debug(f"[{task.id}] seg{seg.index} temp file empty — restarting")
+                elif 0 < actual < seg.file_bytes:
+                    # Partially flushed tail — adjust down to what's on disk
+                    delta = seg.file_bytes - actual
+                    seg.downloaded = max(0, seg.downloaded - delta)
+                    seg.file_bytes = actual
+                    log.debug(
+                        f"[{task.id}] seg{seg.index} reconciled: "
+                        f"disk={actual}, adjusted downloaded={seg.downloaded}"
+                    )
+                # actual == seg.file_bytes → perfect match, nothing to do
+                # actual > seg.file_bytes → handled inside the loop as before
+            elif seg.downloaded > 0:
+                # Temp file is missing but state says we had data — full restart
+                seg.downloaded = 0
+                seg.file_bytes = 0
+                log.debug(f"[{task.id}] seg{seg.index} temp file missing — restarting")
+
             pause_ev = self._pause_events[task.id]
 
             for attempt in range(segment_retries + 1):
@@ -435,7 +460,20 @@ class DownloadEngine:
                         temp_exists = os.path.exists(seg.temp_path)
                         if temp_exists and seg.file_bytes > 0:
                             actual_file_size = os.path.getsize(seg.temp_path)
-                            if actual_file_size != seg.file_bytes:
+                            if actual_file_size == seg.file_bytes:
+                                mode = "ab"   # perfect match
+                            elif actual_file_size < seg.file_bytes:
+                                # Unflushed tail — trust the disk, shrink the counters
+                                delta = seg.file_bytes - actual_file_size
+                                seg.downloaded = max(0, seg.downloaded - delta)
+                                seg.file_bytes = actual_file_size
+                                log.debug(
+                                    f"[{task.id}] seg{seg.index} shrunk to disk size "
+                                    f"{actual_file_size} (delta={delta})"
+                                )
+                                mode = "ab"
+                            else:
+                                # File is LARGER than recorded — genuine corruption, restart
                                 log.warning(
                                     f"[{task.id}] seg{seg.index} file size mismatch: "
                                     f"expected {seg.file_bytes} but found {actual_file_size} "
@@ -445,8 +483,6 @@ class DownloadEngine:
                                 seg.downloaded = 0
                                 seg.file_bytes = 0
                                 mode = "wb"
-                            else:
-                                mode = "ab"
                         elif seg.downloaded > 0 and temp_exists:
                             mode = "ab"
                         else:
