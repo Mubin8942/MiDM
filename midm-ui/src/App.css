@@ -324,26 +324,6 @@ html, body, #root { height: 100%; font-family: var(--font); font-size: 13px; col
   border-color: #22c55e40;
 }
 
-/* ── Title bar shell ─────────────────────────────────── */
-.titlebar {
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-  user-select: none;
-  -webkit-user-select: none;
-  background: var(--titlebar-bg, #1a1a1a);
-  flex-shrink: 0;
-}
-
-.titlebar-title {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-muted, #888);
-  pointer-events: none;
-}
-
 /* ── macOS traffic lights ────────────────────────────── */
 .mac-controls {
   display: flex;
@@ -351,6 +331,7 @@ html, body, #root { height: 100%; font-family: var(--font); font-size: 13px; col
   gap: 8px;
   position: absolute;
   left: 12px;
+  -webkit-app-region: no-drag;
 }
 
 .mac-btn {
@@ -369,49 +350,19 @@ html, body, #root { height: 100%; font-family: var(--font); font-size: 13px; col
   padding: 0;
 }
 
-.mac-btn:hover {
-  filter: brightness(0.85);
-  color: rgba(0, 0, 0, 0.6);
-}
+.mac-btn:hover       { filter: brightness(0.85); color: rgba(0,0,0,0.6); }
+.mac-close           { background: #ff5f57; }
+.mac-minimize        { background: #febc2e; }
+.mac-maximize        { background: #28c840; }
 
-.mac-close    { background: #ff5f57; }
-.mac-minimize { background: #febc2e; }
-.mac-maximize { background: #28c840; }
-
-/* ── Windows / Linux controls ───────────────────────── */
+/* ── Windows / Linux win controls ───────────────────── */
 .win-controls {
   display: flex;
   align-items: center;
-  position: absolute;
-  right: 0;
   height: 100%;
+  margin-left: 4px;
+  -webkit-app-region: no-drag;
 }
 
-.win-btn {
-  width: 46px;
-  height: 100%;
-  border: none;
-  background: transparent;
-  color: var(--text-muted, #aaa);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.15s, color 0.15s;
-}
-
-.win-minimize:hover,
-.win-maximize:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
-}
-
-.win-close:hover {
-  background: #e81123;
-  color: #fff;
-}
-
-/* macOS: add safe zone on right so title stays centered */
-.titlebar-mac .titlebar-title {
-  padding-right: 60px;
-}
+.win-min, .win-max  { width: 46px; height: var(--titlebar-h); }
+.win-close          { width: 46px; height: var(--titlebar-h); }

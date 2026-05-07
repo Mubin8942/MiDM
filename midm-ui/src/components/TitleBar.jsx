@@ -1,21 +1,22 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { platform } from "@tauri-apps/plugin-os";
+import { Plus } from "lucide-react";
+import logo from '../../src-tauri/icons/logo.png';
 
 const appWindow = getCurrentWindow();
 
+function detectOS() {
+  const ua = navigator.userAgent;
+  if (ua.includes("Mac OS X") || ua.includes("Macintosh")) return "macos";
+  if (ua.includes("Windows"))                                return "windows";
+  return "linux";
+}
+
+const OS = detectOS();
+
 // ── macOS traffic lights ──────────────────────────────────────────────────────
 function MacControls() {
-  const [isMaximized, setIsMaximized] = useState(false);
   const [hovered, setHovered] = useState(false);
-
-  useEffect(() => {
-    appWindow.isMaximized().then(setIsMaximized);
-    const unlisten = appWindow.onResized(() => {
-      appWindow.isMaximized().then(setIsMaximized);
-    });
-    return () => { unlisten.then(f => f()); };
-  }, []);
 
   return (
     <div
@@ -23,31 +24,14 @@ function MacControls() {
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      {/* Close — red */}
-      <button
-        className="mac-btn mac-close"
-        onClick={() => appWindow.close()}
-        title="Close"
-      >
+      <button className="mac-btn mac-close"    onClick={() => appWindow.close()}          title="Close">
         {hovered && <span>✕</span>}
       </button>
-
-      {/* Minimize — yellow */}
-      <button
-        className="mac-btn mac-minimize"
-        onClick={() => appWindow.minimize()}
-        title="Minimize"
-      >
+      <button className="mac-btn mac-minimize" onClick={() => appWindow.minimize()}       title="Minimize">
         {hovered && <span>−</span>}
       </button>
-
-      {/* Maximize — green */}
-      <button
-        className="mac-btn mac-maximize"
-        onClick={() => appWindow.toggleMaximize()}
-        title={isMaximized ? "Restore" : "Maximize"}
-      >
-        {hovered && <span>{isMaximized ? "⤓" : "+"}</span>}
+      <button className="mac-btn mac-maximize" onClick={() => appWindow.toggleMaximize()} title="Maximize">
+        {hovered && <span>+</span>}
       </button>
     </div>
   );
@@ -59,86 +43,78 @@ function WinControls() {
 
   useEffect(() => {
     appWindow.isMaximized().then(setIsMaximized);
-    const unlisten = appWindow.onResized(() => {
+    let unlisten;
+    appWindow.onResized(() => {
       appWindow.isMaximized().then(setIsMaximized);
-    });
-    return () => { unlisten.then(f => f()); };
+    }).then(fn => { unlisten = fn; });
+    return () => unlisten?.();
   }, []);
 
   return (
     <div className="win-controls">
-      <button
-        className="win-btn win-minimize"
-        onClick={() => appWindow.minimize()}
-        title="Minimize"
-      >
+      <button className="tb-icon win-min" onClick={() => appWindow.minimize()} title="Minimize">
         <svg width="10" height="1" viewBox="0 0 10 1">
           <rect width="10" height="1" fill="currentColor" />
         </svg>
       </button>
-
-      <button
-        className="win-btn win-maximize"
-        onClick={() => appWindow.toggleMaximize()}
-        title={isMaximized ? "Restore" : "Maximize"}
-      >
+      <button className="tb-icon win-max" onClick={() => appWindow.toggleMaximize()} title={isMaximized ? "Restore" : "Maximize"}>
         {isMaximized ? (
           <svg width="10" height="10" viewBox="0 0 10 10">
-            <path
-              d="M2 0v2H0v8h8V8h2V0H2zm6 9H1V3h7v6zM9 7H8V2H3V1h6v6z"
-              fill="currentColor"
-            />
+            <path d="M2 0v2H0v8h8V8h2V0H2zm6 9H1V3h7v6zM9 7H8V2H3V1h6v6z" fill="currentColor" />
           </svg>
         ) : (
           <svg width="10" height="10" viewBox="0 0 10 10">
-            <path
-              d="M0 0v10h10V0H0zm9 9H1V1h8v8z"
-              fill="currentColor"
-            />
+            <path d="M0 0v10h10V0H0zm9 9H1V1h8v8z" fill="currentColor" />
           </svg>
         )}
       </button>
-
-      <button
-        className="win-btn win-close"
-        onClick={() => appWindow.close()}
-        title="Close"
-      >
+      <button className="tb-icon tb-close win-close" onClick={() => appWindow.close()} title="Close">
         <svg width="10" height="10" viewBox="0 0 10 10">
-          <path
-            d="M1 0L0 1l4 4-4 4 1 1 4-4 4 4 1-1-4-4 4-4-1-1-4 4z"
-            fill="currentColor"
-          />
+          <path d="M1 0L0 1l4 4-4 4 1 1 4-4 4 4 1-1-4-4 4-4-1-1-4 4z" fill="currentColor" />
         </svg>
       </button>
     </div>
   );
 }
 
-// ── Title Bar ─────────────────────────────────────────────────────────────────
-export default function TitleBar() {
-  const [os, setOs] = useState(null);
-
-  useEffect(() => {
-    platform().then(setOs);
-  }, []);
-
-  const isMac = os === "macos";
+// ── Main TitleBar ─────────────────────────────────────────────────────────────
+export default function TitleBar({ onAdd, connected }) {
+  const isMac = OS === "macos";
 
   return (
     <div
-      className={`titlebar ${isMac ? "titlebar-mac" : "titlebar-win"}`}
+      className="titlebar"
       data-tauri-drag-region
+      style={{ paddingLeft: isMac ? "80px" : "12px" }}
     >
-      {/* macOS: controls on LEFT, title centered */}
+      {/* macOS traffic lights sit inside the drag region on the left */}
       {isMac && <MacControls />}
 
-      <span className="titlebar-title" data-tauri-drag-region>
-        MiDM
-      </span>
+      {/* Left — logo + name + connection pill */}
+      <div className="titlebar-left">
+        <div className="app-logo">
+          <img src={logo} alt="MiDM" />
+        </div>
+        <span className="app-name">MiDM</span>
+        <div className={`conn-pill ${connected ? "conn-on" : "conn-off"}`}>
+          <span className="conn-dot" />
+          {connected ? "Connected" : "Offline"}
+        </div>
+      </div>
 
-      {/* Windows / Linux: controls on RIGHT */}
-      {!isMac && os !== null && <WinControls />}
+      {/* Center — spacer */}
+      <div className="titlebar-center" data-tauri-drag-region />
+
+      {/* Right — add button + win controls (Windows/Linux only) */}
+      <div className="titlebar-right">
+        <button className="tb-btn" onClick={onAdd}>
+          <Plus size={13} />
+          New Download
+        </button>
+
+        {/* Windows / Linux only — macOS uses traffic lights above */}
+        {!isMac && <WinControls />}
+      </div>
     </div>
   );
 }
