@@ -4,12 +4,16 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:        # ← adds a "Run workflow" button in the UI
+  workflow_dispatch:
     inputs:
       tag:
-        description: 'Version tag (e.g. v1.0.0)'
+        description: 'Version tag (e.g. v0.1.2)'
         required: true
         default: 'v0.1.2'
+
+# ── ADD THIS ──────────────────────────────────────────────────────────────
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -17,36 +21,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-
-          # ── Windows x64 ───────────────────────────────────────────────
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             bundles: nsis
             label: windows-x64
             backend-name: midm-backend.exe
 
-          # ── macOS Intel ───────────────────────────────────────────────
           - os: macos-latest
             target: x86_64-apple-darwin
             bundles: dmg
             label: macos-intel
             backend-name: midm-backend
 
-          # ── macOS Apple Silicon ───────────────────────────────────────
           - os: macos-latest
             target: aarch64-apple-darwin
             bundles: dmg
             label: macos-arm
             backend-name: midm-backend
 
-          # ── Linux .deb (Debian / Ubuntu / Mint) ──────────────────────
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             bundles: deb
             label: linux-deb
             backend-name: midm-backend
 
-          # ── Linux .rpm (Fedora / RHEL / openSUSE) ────────────────────
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             bundles: rpm
@@ -57,11 +55,9 @@ jobs:
 
     steps:
 
-      # ── 1. Checkout ───────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Python + backend binary ────────────────────────────────────
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -87,7 +83,6 @@ jobs:
             --distpath midm-ui/src-tauri \
             backend/server.py
 
-      # ── 3. Node + frontend ────────────────────────────────────────────
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -99,7 +94,6 @@ jobs:
         run: npm ci
         working-directory: midm-ui
 
-      # ── 4. Rust ───────────────────────────────────────────────────────
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -110,7 +104,6 @@ jobs:
         with:
           workspaces: midm-ui/src-tauri
 
-      # ── 5. Linux system dependencies ──────────────────────────────────
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
@@ -123,7 +116,6 @@ jobs:
             patchelf \
             rpm
 
-      # ── 6. Build Tauri app ────────────────────────────────────────────
       - name: Build & publish Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -131,10 +123,11 @@ jobs:
         with:
           projectPath: midm-ui
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
-          tagName: ${{ github.ref_name }}
-          releaseName: "MiDM ${{ github.ref_name }}"
+          # ── FIX: use input tag when manually triggered, ref_name for tag push ──
+          tagName: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          releaseName: "MiDM ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
           releaseBody: |
-            ## MiDM ${{ github.ref_name }}
+            ## MiDM ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
 
             ### Downloads
             | Platform | File |
@@ -158,12 +151,11 @@ jobs:
           releaseDraft: true
           includeUpdaterJson: false
 
-      # ── 7. Upload artifacts (for debugging CI without a release tag) ──
       - name: Upload build artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: MiDM-${{ matrix.label }}-${{ github.ref_name }}
+          name: MiDM-${{ matrix.label }}-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
           path: |
             midm-ui/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
             midm-ui/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
