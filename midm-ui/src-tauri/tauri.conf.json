@@ -1,6 +1,6 @@
 {
   "productName": "MiDM",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "identifier": "com.mubin.midm",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -35,7 +35,6 @@
     ],
     "macOS": {
       "minimumSystemVersion": "10.15",
-      "signingIdentity": null,
       "entitlements": null
     },
     "linux": {

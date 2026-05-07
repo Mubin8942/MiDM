@@ -1,5 +1,8 @@
 {
   "bundle": {
-    "resources": ["midm-backend"]
+    "resources": ["midm-backend"],
+    "macOS": {
+      "signingIdentity": "-"
+    }
   }
 }
