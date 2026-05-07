@@ -75,16 +75,16 @@ jobs:
         run: |
           pyinstaller --onefile --noconsole `
             --name midm-backend `
-            --distpath midm-ui/midm-backend.exe `
+            --distpath midm-ui/src-tauri `
             backend/server.py
         shell: pwsh
 
       - name: Build Python backend (macOS & Linux)
         if: runner.os != 'Windows'
         run: |
-          pyinstaller --onefile --noconsole \
+          pyinstaller --onefile \
             --name midm-backend \
-            --distpath midm-ui/midm-backend \
+            --distpath midm-ui/src-tauri \
             backend/server.py
 
       # ── 3. Node + frontend ────────────────────────────────────────────
