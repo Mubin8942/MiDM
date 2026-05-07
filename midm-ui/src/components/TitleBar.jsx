@@ -1,68 +1,144 @@
-import { Download, Plus, Settings, Minus, Square, X } from 'lucide-react';
-import { useDownloadStore, fmtSpeed } from '../store/downloadStore';
-import logo from '../../src-tauri/icons/logo.png';
-import { getCurrentWindow } from '@tauri-apps/api/window';
-import { invoke } from '@tauri-apps/api/core';
+import { useEffect, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { platform } from "@tauri-apps/plugin-os";
 
-export default function TitleBar({ onAdd }) {
-  const { connected, tasks } = useDownloadStore();
-  const totalSpeed = tasks
-    .filter(t => t.status === 'downloading')
-    .reduce((s, t) => s + (t.speed || 0), 0);
+const appWindow = getCurrentWindow();
 
-  const handleClose = async () => {
-    try {
-      const win = getCurrentWindow();
-      await win.close();
-    } catch(e) {
-      console.error('close failed:', e);
-    }
-  };
+// ── macOS traffic lights ──────────────────────────────────────────────────────
+function MacControls() {
+  const [isMaximized, setIsMaximized] = useState(false);
+  const [hovered, setHovered] = useState(false);
 
-  const handleMin = async () => {
-    try {
-      const win = getCurrentWindow();
-      await win.minimize();
-    } catch(e) {
-      console.error('minimize failed:', e);
-    }
-  };
-
-  const handleMax = async () => {
-    try {
-      const win = getCurrentWindow();
-      await win.toggleMaximize();
-    } catch(e) {
-      console.error('maximize failed:', e);
-    }
-  };
+  useEffect(() => {
+    appWindow.isMaximized().then(setIsMaximized);
+    const unlisten = appWindow.onResized(() => {
+      appWindow.isMaximized().then(setIsMaximized);
+    });
+    return () => { unlisten.then(f => f()); };
+  }, []);
 
   return (
-    <header className="titlebar" data-tauri-drag-region>
-      <div className="titlebar-left">
-        <div className="app-logo">
-          <img src={logo} alt="MiDM" />
-        </div>
-        <span className="app-name">MiDM</span>
-        <div className={`conn-pill ${connected ? 'conn-on' : 'conn-off'}`}>
-          <span className="conn-dot" />
-          {connected ? (totalSpeed > 0 ? fmtSpeed(totalSpeed) : 'Ready') : 'Offline'}
-        </div>
-      </div>
+    <div
+      className="mac-controls"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      {/* Close — red */}
+      <button
+        className="mac-btn mac-close"
+        onClick={() => appWindow.close()}
+        title="Close"
+      >
+        {hovered && <span>✕</span>}
+      </button>
 
-      <div className="titlebar-center" data-tauri-drag-region>
-        {/* Draggable zone */}
-      </div>
+      {/* Minimize — yellow */}
+      <button
+        className="mac-btn mac-minimize"
+        onClick={() => appWindow.minimize()}
+        title="Minimize"
+      >
+        {hovered && <span>−</span>}
+      </button>
 
-      <div className="titlebar-right">
-        <button className="tb-btn add-btn" onClick={onAdd} title="New Download (Ctrl+N)">
-          <Plus size={14} />
-          <span>New Download</span>
-        </button>
-        <button className="tb-icon" onClick={handleMin} title="Minimize"><Minus size={12} /></button>
-        <button className="tb-icon" onClick={handleMax} title="Maximize"><Square size={11} /></button>
-        <button className="tb-icon tb-close" onClick={handleClose} title="Close"><X size={12} /></button>
-      </div>
-    </header>
+      {/* Maximize — green */}
+      <button
+        className="mac-btn mac-maximize"
+        onClick={() => appWindow.toggleMaximize()}
+        title={isMaximized ? "Restore" : "Maximize"}
+      >
+        {hovered && <span>{isMaximized ? "⤓" : "+"}</span>}
+      </button>
+    </div>
+  );
+}
+
+// ── Windows / Linux controls ──────────────────────────────────────────────────
+function WinControls() {
+  const [isMaximized, setIsMaximized] = useState(false);
+
+  useEffect(() => {
+    appWindow.isMaximized().then(setIsMaximized);
+    const unlisten = appWindow.onResized(() => {
+      appWindow.isMaximized().then(setIsMaximized);
+    });
+    return () => { unlisten.then(f => f()); };
+  }, []);
+
+  return (
+    <div className="win-controls">
+      <button
+        className="win-btn win-minimize"
+        onClick={() => appWindow.minimize()}
+        title="Minimize"
+      >
+        <svg width="10" height="1" viewBox="0 0 10 1">
+          <rect width="10" height="1" fill="currentColor" />
+        </svg>
+      </button>
+
+      <button
+        className="win-btn win-maximize"
+        onClick={() => appWindow.toggleMaximize()}
+        title={isMaximized ? "Restore" : "Maximize"}
+      >
+        {isMaximized ? (
+          <svg width="10" height="10" viewBox="0 0 10 10">
+            <path
+              d="M2 0v2H0v8h8V8h2V0H2zm6 9H1V3h7v6zM9 7H8V2H3V1h6v6z"
+              fill="currentColor"
+            />
+          </svg>
+        ) : (
+          <svg width="10" height="10" viewBox="0 0 10 10">
+            <path
+              d="M0 0v10h10V0H0zm9 9H1V1h8v8z"
+              fill="currentColor"
+            />
+          </svg>
+        )}
+      </button>
+
+      <button
+        className="win-btn win-close"
+        onClick={() => appWindow.close()}
+        title="Close"
+      >
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <path
+            d="M1 0L0 1l4 4-4 4 1 1 4-4 4 4 1-1-4-4 4-4-1-1-4 4z"
+            fill="currentColor"
+          />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+// ── Title Bar ─────────────────────────────────────────────────────────────────
+export default function TitleBar() {
+  const [os, setOs] = useState(null);
+
+  useEffect(() => {
+    platform().then(setOs);
+  }, []);
+
+  const isMac = os === "macos";
+
+  return (
+    <div
+      className={`titlebar ${isMac ? "titlebar-mac" : "titlebar-win"}`}
+      data-tauri-drag-region
+    >
+      {/* macOS: controls on LEFT, title centered */}
+      {isMac && <MacControls />}
+
+      <span className="titlebar-title" data-tauri-drag-region>
+        MiDM
+      </span>
+
+      {/* Windows / Linux: controls on RIGHT */}
+      {!isMac && os !== null && <WinControls />}
+    </div>
   );
 }
