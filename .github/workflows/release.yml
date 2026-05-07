@@ -1,0 +1,166 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+
+          # ── Windows x64 ───────────────────────────────────────────────
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+            label: windows-x64
+            backend-name: midm-backend.exe
+
+          # ── macOS Intel ───────────────────────────────────────────────
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            bundles: dmg
+            label: macos-intel
+            backend-name: midm-backend
+
+          # ── macOS Apple Silicon ───────────────────────────────────────
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bundles: dmg
+            label: macos-arm
+            backend-name: midm-backend
+
+          # ── Linux .deb (Debian / Ubuntu / Mint) ──────────────────────
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: deb
+            label: linux-deb
+            backend-name: midm-backend
+
+          # ── Linux .rpm (Fedora / RHEL / openSUSE) ────────────────────
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: rpm
+            label: linux-rpm
+            backend-name: midm-backend
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+
+      # ── 1. Checkout ───────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python + backend binary ────────────────────────────────────
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build Python backend (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --onefile --noconsole `
+            --name midm-backend `
+            --distpath midm-ui/midm-backend.exe `
+            backend/server.py
+        shell: pwsh
+
+      - name: Build Python backend (macOS & Linux)
+        if: runner.os != 'Windows'
+        run: |
+          pyinstaller --onefile --noconsole \
+            --name midm-backend \
+            --distpath midm-ui/midm-backend \
+            backend/server.py
+
+      # ── 3. Node + frontend ────────────────────────────────────────────
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: midm-ui/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: midm-ui
+
+      # ── 4. Rust ───────────────────────────────────────────────────────
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: midm-ui/src-tauri
+
+      # ── 5. Linux system dependencies ──────────────────────────────────
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            rpm
+
+      # ── 6. Build Tauri app ────────────────────────────────────────────
+      - name: Build & publish Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: midm-ui
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          tagName: ${{ github.ref_name }}
+          releaseName: "MiDM ${{ github.ref_name }}"
+          releaseBody: |
+            ## MiDM ${{ github.ref_name }}
+
+            ### Downloads
+            | Platform | File |
+            |----------|------|
+            | Windows 10/11 | `MiDM_*_x64-setup.exe` |
+            | macOS Intel | `MiDM_*_x64.dmg` |
+            | macOS Apple Silicon | `MiDM_*_aarch64.dmg` |
+            | Ubuntu / Debian | `MiDM_*_amd64.deb` |
+            | Fedora / RHEL | `MiDM_*_x86_64.rpm` |
+
+            ### Linux install
+            ```bash
+            # Debian / Ubuntu
+            sudo dpkg -i MiDM_*_amd64.deb
+
+            # Fedora / RHEL
+            sudo rpm -i MiDM_*_x86_64.rpm
+            ```
+
+            See [CHANGELOG.md](./CHANGELOG.md) for full details.
+          releaseDraft: true
+          includeUpdaterJson: false
+
+      # ── 7. Upload artifacts (for debugging CI without a release tag) ──
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiDM-${{ matrix.label }}-${{ github.ref_name }}
+          path: |
+            midm-ui/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
+            midm-ui/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
+            midm-ui/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.deb
+            midm-ui/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.rpm
+          retention-days: 7

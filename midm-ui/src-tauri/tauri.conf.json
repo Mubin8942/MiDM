@@ -1,7 +1,7 @@
 {
   "productName": "MiDM",
   "version": "0.1.0",
-  "identifier": "com.reddot.midm",
+  "identifier": "com.mubin.midm",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
@@ -24,7 +24,6 @@
     }
   },
   "bundle": {
-    "resources": ["midm-backend.exe"],
     "active": true,
     "targets": "all",
     "icon": [
@@ -33,6 +32,37 @@
       "icons/128x128@2x.png",
       "icons/icon.ico",
       "icons/icon.png"
-    ]
+    ],
+    "windows": {
+      "resources": ["midm-backend.exe"]
+    },
+    "macOS": {
+      "resources": ["midm-backend"],
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": null,
+      "entitlements": null
+    },
+    "linux": {
+      "resources": ["midm-backend"],
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libayatana-appindicator3-1"
+        ]
+      },
+      "rpm": {
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3",
+          "libayatana-appindicator"
+        ],
+        "release": "1",
+        "epoch": 0
+      },
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    }
   }
 }
