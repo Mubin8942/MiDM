@@ -33,17 +33,12 @@
       "icons/icon.ico",
       "icons/icon.png"
     ],
-    "windows": {
-      "resources": ["midm-backend.exe"]
-    },
     "macOS": {
-      "resources": ["midm-backend"],
       "minimumSystemVersion": "10.15",
       "signingIdentity": null,
       "entitlements": null
     },
     "linux": {
-      "resources": ["midm-backend"],
       "deb": {
         "depends": [
           "libwebkit2gtk-4.1-0",
