@@ -9,7 +9,7 @@ on:
       tag:
         description: 'Version tag (e.g. v0.1.2)'
         required: true
-        default: 'v0.1.2'
+        default: 'v0.1.3'
 
 # ── ADD THIS ──────────────────────────────────────────────────────────────
 permissions:
@@ -86,7 +86,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: midm-ui/package-lock.json
 
