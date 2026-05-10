@@ -2,7 +2,8 @@
   "bundle": {
     "resources": ["midm-backend"],
     "macOS": {
-      "signingIdentity": null
+      "signingIdentity": null,
+      "dmgBackground": null
     }
   }
 }
