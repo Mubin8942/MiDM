@@ -61,7 +61,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'   # 3.13 — fully supported by Nuitka 4.x
+          python-version: '3.13'
 
       - name: Install Python dependencies
         run: pip install -r backend/requirements.txt
@@ -76,6 +76,7 @@ jobs:
           python -m nuitka `
             --standalone `
             --onefile `
+            --assume-yes-for-downloads `
             --output-dir=../midm-ui/src-tauri `
             --output-filename=midm-backend.exe `
             --windows-console-mode=disable `
@@ -91,6 +92,11 @@ jobs:
             server.py
 
       # ── Backend build: macOS ──────────────────────────────────────────────
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install ccache || true
+
       - name: Build Python backend (macOS — Nuitka)
         if: runner.os == 'macOS'
         run: |
@@ -99,6 +105,7 @@ jobs:
           python -m nuitka \
             --standalone \
             --onefile \
+            --assume-yes-for-downloads \
             --output-dir=../midm-ui/src-tauri \
             --output-filename=midm-backend \
             --include-package=aiohttp \
@@ -111,7 +118,13 @@ jobs:
             server.py
           chmod +x ../midm-ui/src-tauri/midm-backend
 
-      # ── Backend build: Linux DEB (Ubuntu) ─────────────────────────────────
+      # ── Backend build: Linux (shared deps for both DEB and RPM) ───────────
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc patchelf ccache
+
       - name: Build Python backend (Linux DEB — Nuitka)
         if: matrix.label == 'linux-deb'
         run: |
@@ -120,6 +133,7 @@ jobs:
           python -m nuitka \
             --standalone \
             --onefile \
+            --assume-yes-for-downloads \
             --output-dir=../midm-ui/src-tauri \
             --output-filename=midm-backend \
             --include-package=aiohttp \
@@ -130,9 +144,6 @@ jobs:
             server.py
           chmod +x ../midm-ui/src-tauri/midm-backend
 
-      # ── Backend build: Linux RPM (build on Ubuntu, package for RHEL/CentOS) ──
-      # GitHub Actions has no CentOS runner, so we build the binary on Ubuntu
-      # (glibc 2.35) which is compatible with RHEL 9 / CentOS Stream 9 (glibc 2.34+)
       - name: Build Python backend (Linux RPM — Nuitka)
         if: matrix.label == 'linux-rpm'
         run: |
@@ -141,6 +152,7 @@ jobs:
           python -m nuitka \
             --standalone \
             --onefile \
+            --assume-yes-for-downloads \
             --output-dir=../midm-ui/src-tauri \
             --output-filename=midm-backend \
             --include-package=aiohttp \
@@ -153,9 +165,19 @@ jobs:
 
       # ── Verify backend binary exists ──────────────────────────────────────
       - name: Verify backend binary
-        run: |
-          ls -la midm-ui/src-tauri/
         shell: bash
+        run: |
+          echo "── src-tauri contents ──"
+          ls -la midm-ui/src-tauri/
+          echo "── Checking backend binary ──"
+          if [ -f "midm-ui/src-tauri/midm-backend.exe" ]; then
+            echo "✓ midm-backend.exe found"
+          elif [ -f "midm-ui/src-tauri/midm-backend" ]; then
+            echo "✓ midm-backend found"
+          else
+            echo "✗ ERROR: Backend binary not found!"
+            exit 1
+          fi
 
       # ── Frontend ──────────────────────────────────────────────────────────
       - name: Setup Node
@@ -204,24 +226,35 @@ jobs:
             patchelf \
             rpm
 
-      # ── macOS: allow unsigned binary to run ───────────────────────────────
+      # ── macOS: remove quarantine + disable signing if no cert ─────────────
       - name: Remove macOS quarantine from backend binary
         if: runner.os == 'macOS'
         run: |
           xattr -cr midm-ui/src-tauri/midm-backend || true
 
+      - name: Disable macOS code signing (no certificate configured)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "No Apple certificate found — disabling code signing"
+            echo "APPLE_SIGNING_IDENTITY=-" >> $GITHUB_ENV
+          else
+            echo "Apple certificate found — signing will be attempted"
+          fi
+
       # ── Tauri build & release ─────────────────────────────────────────────
       - name: Build & publish Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS code signing (optional — leave empty to skip)
-          APPLE_CERTIFICATE:            ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD:   ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY:       ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID:                     ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD:               ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID:                ${{ secrets.APPLE_TEAM_ID }}
+          GITHUB_TOKEN:               ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE:          ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY:     ${{ env.APPLE_SIGNING_IDENTITY || secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID:                   ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD:             ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID:              ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: midm-ui
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
@@ -245,8 +278,9 @@ jobs:
 
             **macOS:**
             ```bash
-            # If Gatekeeper blocks it:
+            # If Gatekeeper blocks the app:
             xattr -cr /Applications/MiDM.app
+            open /Applications/MiDM.app
             ```
 
             **Debian / Ubuntu:**
@@ -260,6 +294,7 @@ jobs:
             ```
 
             > **Note:** The RPM package requires RHEL 9 / CentOS Stream 9 or Fedora 36+ (glibc 2.34+).
+            > The macOS build is unsigned — Gatekeeper will warn on first launch. Use the command above to bypass.
 
             See [CHANGELOG.md](./CHANGELOG.md) for full details.
           releaseDraft: true
