@@ -295,8 +295,6 @@ jobs:
 
             > **Note:** The RPM package requires RHEL 9 / CentOS Stream 9 or Fedora 36+ (glibc 2.34+).
             > The macOS build is unsigned — Gatekeeper will warn on first launch. Use the command above to bypass.
-
-            See [CHANGELOG.md](./CHANGELOG.md) for full details.
           releaseDraft: true
           includeUpdaterJson: false
 

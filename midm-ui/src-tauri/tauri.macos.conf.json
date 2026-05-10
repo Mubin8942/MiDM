@@ -2,7 +2,7 @@
   "bundle": {
     "resources": ["midm-backend"],
     "macOS": {
-      "signingIdentity": "-"
+      "signingIdentity": null
     }
   }
 }
