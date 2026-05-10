@@ -26,7 +26,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <TitleBar onAdd={() => setShowAdd(true)} />
+      <TitleBar onAdd={() => setShowAdd(true)} connected={connected} />
       <div className="app-body">
         <Sidebar />
         <main className="main-content">

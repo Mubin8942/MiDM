@@ -98,7 +98,7 @@ export default function TitleBar({ onAdd, connected }) {
         <span className="app-name">MiDM</span>
         <div className={`conn-pill ${connected ? "conn-on" : "conn-off"}`}>
           <span className="conn-dot" />
-          {connected ? "Connected" : "Offline"}
+          {connected ? "Ready" : "Offline"}
         </div>
       </div>
 

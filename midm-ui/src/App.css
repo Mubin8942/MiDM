@@ -50,8 +50,8 @@ html, body, #root { height: 100%; font-family: var(--font); font-size: 13px; col
 [data-theme="light"] .app-logo img {
   mix-blend-mode: multiply;
 }
-.app-name { font-weight: 600; font-size: 14px; letter-spacing: 0.05em; }
-.conn-pill { display: flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 99px; font-size: 11px; font-family: var(--font-mono); font-weight: 500; border: 1px solid; }
+.app-name { font-weight: 600; font-size: 18px; letter-spacing: 0.05em; }
+.conn-pill { display: flex; align-items: center; gap: 4px; padding: 1px 6px; border-radius: 99px; font-size: 10px; font-family: var(--font-mono); font-weight: 500; border: 1px solid; }
 .conn-on { background: #22c55e14; border-color: #22c55e40; color: var(--green); }
 .conn-off { background: #ef444414; border-color: #ef444440; color: var(--red); }
 .conn-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }

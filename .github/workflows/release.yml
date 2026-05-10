@@ -9,9 +9,8 @@ on:
       tag:
         description: 'Version tag (e.g. v0.1.2)'
         required: true
-        default: 'v0.1.4'
+        default: 'v0.1.6'
 
-# ── ADD THIS ──────────────────────────────────────────────────────────────
 permissions:
   contents: write
 
@@ -58,31 +57,107 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ── Python setup ──────────────────────────────────────────────────────
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.13'   # 3.13 — fully supported by Nuitka 4.x
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt pyinstaller
+        run: pip install -r backend/requirements.txt
 
-      - name: Build Python backend (Windows)
+      # ── Backend build: Windows ────────────────────────────────────────────
+      - name: Build Python backend (Windows — Nuitka)
         if: runner.os == 'Windows'
-        run: |
-          pyinstaller --onefile --noconsole `
-            --name midm-backend `
-            --distpath midm-ui/src-tauri `
-            backend/server.py
         shell: pwsh
-
-      - name: Build Python backend (macOS & Linux)
-        if: runner.os != 'Windows'
         run: |
-          pyinstaller --onefile \
-            --name midm-backend \
-            --distpath midm-ui/src-tauri \
-            backend/server.py
+          pip install nuitka ordered-set zstandard
+          cd backend
+          python -m nuitka `
+            --standalone `
+            --onefile `
+            --output-dir=../midm-ui/src-tauri `
+            --output-filename=midm-backend.exe `
+            --windows-console-mode=disable `
+            --include-package=aiohttp `
+            --include-package=aiofiles `
+            --include-package=certifi `
+            --include-package=core `
+            --include-data-dir=core=core `
+            --company-name="MiDM" `
+            --product-name="MiDM Backend" `
+            --file-version=1.0.0.0 `
+            --product-version=1.0.0.0 `
+            server.py
 
+      # ── Backend build: macOS ──────────────────────────────────────────────
+      - name: Build Python backend (macOS — Nuitka)
+        if: runner.os == 'macOS'
+        run: |
+          pip install nuitka ordered-set zstandard
+          cd backend
+          python -m nuitka \
+            --standalone \
+            --onefile \
+            --output-dir=../midm-ui/src-tauri \
+            --output-filename=midm-backend \
+            --include-package=aiohttp \
+            --include-package=aiofiles \
+            --include-package=certifi \
+            --include-package=core \
+            --include-data-dir=core=core \
+            --company-name="MiDM" \
+            --product-name="MiDM Backend" \
+            server.py
+          chmod +x ../midm-ui/src-tauri/midm-backend
+
+      # ── Backend build: Linux DEB (Ubuntu) ─────────────────────────────────
+      - name: Build Python backend (Linux DEB — Nuitka)
+        if: matrix.label == 'linux-deb'
+        run: |
+          pip install nuitka ordered-set zstandard
+          cd backend
+          python -m nuitka \
+            --standalone \
+            --onefile \
+            --output-dir=../midm-ui/src-tauri \
+            --output-filename=midm-backend \
+            --include-package=aiohttp \
+            --include-package=aiofiles \
+            --include-package=certifi \
+            --include-package=core \
+            --include-data-dir=core=core \
+            server.py
+          chmod +x ../midm-ui/src-tauri/midm-backend
+
+      # ── Backend build: Linux RPM (build on Ubuntu, package for RHEL/CentOS) ──
+      # GitHub Actions has no CentOS runner, so we build the binary on Ubuntu
+      # (glibc 2.35) which is compatible with RHEL 9 / CentOS Stream 9 (glibc 2.34+)
+      - name: Build Python backend (Linux RPM — Nuitka)
+        if: matrix.label == 'linux-rpm'
+        run: |
+          pip install nuitka ordered-set zstandard
+          cd backend
+          python -m nuitka \
+            --standalone \
+            --onefile \
+            --output-dir=../midm-ui/src-tauri \
+            --output-filename=midm-backend \
+            --include-package=aiohttp \
+            --include-package=aiofiles \
+            --include-package=certifi \
+            --include-package=core \
+            --include-data-dir=core=core \
+            server.py
+          chmod +x ../midm-ui/src-tauri/midm-backend
+
+      # ── Verify backend binary exists ──────────────────────────────────────
+      - name: Verify backend binary
+        run: |
+          ls -la midm-ui/src-tauri/
+        shell: bash
+
+      # ── Frontend ──────────────────────────────────────────────────────────
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -94,6 +169,7 @@ jobs:
         run: npm ci
         working-directory: midm-ui
 
+      # ── Rust ──────────────────────────────────────────────────────────────
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -104,8 +180,20 @@ jobs:
         with:
           workspaces: midm-ui/src-tauri
 
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
+      # ── Linux system dependencies ─────────────────────────────────────────
+      - name: Install Linux system dependencies (DEB)
+        if: matrix.label == 'linux-deb'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install Linux system dependencies (RPM)
+        if: matrix.label == 'linux-rpm'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -116,14 +204,27 @@ jobs:
             patchelf \
             rpm
 
+      # ── macOS: allow unsigned binary to run ───────────────────────────────
+      - name: Remove macOS quarantine from backend binary
+        if: runner.os == 'macOS'
+        run: |
+          xattr -cr midm-ui/src-tauri/midm-backend || true
+
+      # ── Tauri build & release ─────────────────────────────────────────────
       - name: Build & publish Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS code signing (optional — leave empty to skip)
+          APPLE_CERTIFICATE:            ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD:   ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY:       ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID:                     ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD:               ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID:                ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: midm-ui
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
-          # ── FIX: use input tag when manually triggered, ref_name for tag push ──
           tagName: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
           releaseName: "MiDM ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
           releaseBody: |
@@ -132,25 +233,39 @@ jobs:
             ### Downloads
             | Platform | File |
             |----------|------|
-            | Windows 10/11 | `MiDM_*_x64-setup.exe` |
+            | Windows 10/11 (64-bit) | `MiDM_*_x64-setup.exe` |
             | macOS Intel | `MiDM_*_x64.dmg` |
             | macOS Apple Silicon | `MiDM_*_aarch64.dmg` |
             | Ubuntu / Debian | `MiDM_*_amd64.deb` |
-            | Fedora / RHEL | `MiDM_*_x86_64.rpm` |
+            | RHEL / CentOS Stream 9+ / Fedora | `MiDM_*_x86_64.rpm` |
 
-            ### Linux install
+            ### Install instructions
+
+            **Windows:** Run the `.exe` installer. If SmartScreen warns, click "More info → Run anyway".
+
+            **macOS:**
             ```bash
-            # Debian / Ubuntu
-            sudo dpkg -i MiDM_*_amd64.deb
+            # If Gatekeeper blocks it:
+            xattr -cr /Applications/MiDM.app
+            ```
 
-            # Fedora / RHEL
+            **Debian / Ubuntu:**
+            ```bash
+            sudo dpkg -i MiDM_*_amd64.deb
+            ```
+
+            **RHEL 9 / CentOS Stream 9 / Fedora:**
+            ```bash
             sudo rpm -i MiDM_*_x86_64.rpm
             ```
+
+            > **Note:** The RPM package requires RHEL 9 / CentOS Stream 9 or Fedora 36+ (glibc 2.34+).
 
             See [CHANGELOG.md](./CHANGELOG.md) for full details.
           releaseDraft: true
           includeUpdaterJson: false
 
+      # ── Upload artifacts ──────────────────────────────────────────────────
       - name: Upload build artifacts
         if: always()
         uses: actions/upload-artifact@v4

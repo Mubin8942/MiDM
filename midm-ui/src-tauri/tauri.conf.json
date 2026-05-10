@@ -1,6 +1,6 @@
 {
   "productName": "MiDM",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "identifier": "com.mubin.midm",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -47,9 +47,9 @@
       },
       "rpm": {
         "depends": [
-          "webkit2gtk4.1",
           "gtk3",
-          "libayatana-appindicator"
+          "webkit2gtk3",
+          "openssl"
         ],
         "release": "1",
         "epoch": 0
