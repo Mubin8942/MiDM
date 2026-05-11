@@ -1,8 +1,7 @@
 import { useState } from 'react';
 import { Download, CheckCircle, Pause, Clock, AlertCircle, Layers, Settings, FolderOpen, AlertTriangle } from 'lucide-react';
 import { useDownloadStore } from '../store/downloadStore';
-import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
-import { downloadDir, join } from '@tauri-apps/api/path';
+import { openFolder } from '../lib/openFolder';
 import SettingsModal from './SettingsModal';
 
 const NAV = [
@@ -38,34 +37,16 @@ export default function Sidebar() {
   };
 
   const openDownloadsFolder = async () => {
-    try {
-      const recentCompleted = [...tasks]
-        .reverse()
-        .find(t => t.status === 'completed' && t.save_dir && t.filename);
+    const recentCompleted = [...tasks]
+      .reverse()
+      .find(t => t.status === 'completed' && t.save_dir && t.filename);
 
-      if (recentCompleted) {
-        // join() handles separators correctly on Windows, Mac, and Linux
-        const filePath = await join(recentCompleted.save_dir, recentCompleted.filename);
-        try {
-          await revealItemInDir(filePath);
-        } catch {
-          // File missing — try opening just the folder
-          try {
-            await openPath(recentCompleted.save_dir);
-          } catch {
-            showToast(`"${recentCompleted.filename}" was not found. It may have been moved or deleted.`);
-          }
-        }
-        return;
-      }
+    const error = await openFolder(
+      recentCompleted?.save_dir ?? null,
+      recentCompleted?.filename ?? null
+    );
 
-      // Fallback: open the system Downloads folder
-      const dir = await downloadDir();
-      await openPath(dir);
-    } catch (e) {
-      console.error('Failed to open downloads folder:', e);
-      showToast('Could not open the downloads folder.');
-    }
+    if (error) showToast(error);
   };
 
   return (

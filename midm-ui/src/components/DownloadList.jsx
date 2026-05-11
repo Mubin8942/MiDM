@@ -6,6 +6,7 @@ import {
   Plus, RotateCcw, AlertTriangle, CirclePlay
 } from 'lucide-react';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
+import { openFolder } from '../lib/openFolder';
 
 // ─── Toast ───────────────────────────────────────────────────────────────────
 function Toast({ message, onClose }) {
@@ -90,13 +91,8 @@ function DownloadCard({ task, onToast }) {
   });
 
   const handleShowInFolder = async () => {
-  try {
-    const sep = task.save_dir.endsWith('\\') || task.save_dir.endsWith('/') ? '' : '\\';
-    const filePath = `${task.save_dir}${sep}${task.filename}`;
-    await revealItemInDir(filePath);
-    } catch (e) {
-      onToast(`"${task.filename}" was not found. It may have been moved or deleted.`);
-    }
+    const error = await openFolder(task.save_dir, task.filename);
+    if (error) onToast(error);
   };
 
   return (
