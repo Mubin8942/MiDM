@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Download, CheckCircle, Pause, Clock, AlertCircle, Layers, Settings, FolderOpen, AlertTriangle } from 'lucide-react';
 import { useDownloadStore } from '../store/downloadStore';
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
-import { downloadDir } from '@tauri-apps/api/path';
+import { downloadDir, join } from '@tauri-apps/api/path';
 import SettingsModal from './SettingsModal';
 
 const NAV = [
@@ -29,10 +29,8 @@ export default function Sidebar() {
   const [toast, setToast]               = useState(null);
   const [showSettings, setShowSettings] = useState(false);
 
-  const count = (status) => {
-    if (status === 'all') return tasks.length;
-    return tasks.filter(t => t.status === status).length;
-  };
+  const count = (status) =>
+    status === 'all' ? tasks.length : tasks.filter(t => t.status === status).length;
 
   const showToast = (message) => {
     setToast(message);
@@ -46,29 +44,24 @@ export default function Sidebar() {
         .find(t => t.status === 'completed' && t.save_dir && t.filename);
 
       if (recentCompleted) {
-        const sep = recentCompleted.save_dir.endsWith('\\') || recentCompleted.save_dir.endsWith('/') ? '' : '\\';
-        const filePath = `${recentCompleted.save_dir}${sep}${recentCompleted.filename}`;
+        // join() handles separators correctly on Windows, Mac, and Linux
+        const filePath = await join(recentCompleted.save_dir, recentCompleted.filename);
         try {
           await revealItemInDir(filePath);
-          return;
         } catch {
+          // File missing — try opening just the folder
           try {
             await openPath(recentCompleted.save_dir);
-            return;
           } catch {
             showToast(`"${recentCompleted.filename}" was not found. It may have been moved or deleted.`);
-            return;
           }
         }
+        return;
       }
 
-      // Fallback: system Downloads folder
+      // Fallback: open the system Downloads folder
       const dir = await downloadDir();
-      try {
-        await openPath(dir);
-      } catch {
-        await revealItemInDir(dir + '\\placeholder');
-      }
+      await openPath(dir);
     } catch (e) {
       console.error('Failed to open downloads folder:', e);
       showToast('Could not open the downloads folder.');
@@ -77,10 +70,7 @@ export default function Sidebar() {
 
   return (
     <>
-      {showSettings && (
-        <SettingsModal onClose={() => setShowSettings(false)} />
-      )}
-
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       <aside className="sidebar">
         {toast && <Toast message={toast} onClose={() => setToast(null)} />}
         <nav className="sidebar-nav">
